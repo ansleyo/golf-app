@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "../lib/supabase";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 
 type Suit = "♠" | "♥" | "♦" | "♣";
 type Card = { rank: string; suit: Suit };
@@ -54,6 +55,7 @@ export default function Home() {
   const [localPlayer, setLocalPlayer] = useState(0);
   const [connectionError, setConnectionError] = useState("");
   const remoteChange = useRef(false);
+  const roomChannel = useRef<RealtimeChannel | null>(null);
   const roomCode = activeRoom || "GOLF-DEMO";
 
   useEffect(() => {
@@ -62,22 +64,31 @@ export default function Home() {
 
   useEffect(() => {
     if (!activeRoom) return;
+    const applyRemoteState = (state: Game) => {
+      remoteChange.current = true;
+      setGame(state);
+    };
     const channel = supabase.channel(`golf-room-${activeRoom}`).on(
+      "broadcast",
+      { event: "game-state" },
+      ({ payload }) => applyRemoteState(payload.state as Game)
+    ).on(
       "postgres_changes",
       { event: "UPDATE", schema: "public", table: "golf_rooms", filter: `code=eq.${activeRoom}` },
       ({ new: updated }) => {
         const state = updated.state as Game;
-        remoteChange.current = true;
-        setGame(state);
+        applyRemoteState(state);
       }
     ).subscribe();
-    return () => { supabase.removeChannel(channel); };
+    roomChannel.current = channel;
+    return () => { roomChannel.current = null; supabase.removeChannel(channel); };
   }, [activeRoom]);
 
   useEffect(() => {
     if (!activeRoom) return;
     if (remoteChange.current) { remoteChange.current = false; return; }
     void supabase.from("golf_rooms").update({ state: game, updated_at: new Date().toISOString() }).eq("code", activeRoom);
+    void roomChannel.current?.send({ type: "broadcast", event: "game-state", payload: { state: game } });
   }, [game, activeRoom]);
 
   const start = (players = count) => {
