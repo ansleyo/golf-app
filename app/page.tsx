@@ -7,7 +7,7 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 type Suit = "♠" | "♥" | "♦" | "♣";
 type Card = { rank: string; suit: Suit };
 type Player = { name: string; cards: Card[]; topUsed: boolean[]; score: number };
-type Game = { players: Player[]; draw: Card[]; discard: Card[]; turn: number };
+type Game = { players: Player[]; draw: Card[]; discard: Card[]; turn: number; maxPlayers: number; started: boolean };
 
 const suits: Suit[] = ["♠", "♥", "♦", "♣"];
 const ranks = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
@@ -31,13 +31,15 @@ function shuffle<T>(values: T[]) {
   return next;
 }
 
-function makeGame(count: number, randomize = true, localName = "You"): Game {
+function makeGame(count: number, _randomize = true, localName = "You"): Game {
   const cards = suits.flatMap((suit) => ranks.map((rank) => ({ rank, suit })));
-  // The first render must be identical on Next's server and in the browser.
-  // Subsequent new games are shuffled from the button click.
-  const deck = randomize ? shuffle(cards) : cards;
-  const players = names.slice(0, count).map((name, index) => ({ name: index === 0 ? localName : name, cards: deck.splice(0, 4), topUsed: [false, false], score: 0 }));
-  return { players, draw: deck, discard: [deck.pop()!], turn: 0 };
+  return { players: [{ name: localName, cards: [], topUsed: [false, false], score: 0 }], draw: cards, discard: [], turn: 0, maxPlayers: count, started: false };
+}
+
+function dealRound(game: Game): Game {
+  const deck = shuffle(suits.flatMap((suit) => ranks.map((rank) => ({ rank, suit }))));
+  const players = game.players.map((player) => ({ ...player, cards: deck.splice(0, 4), topUsed: [false, false] }));
+  return { ...game, players, draw: deck, discard: [deck.pop()!], turn: 0, started: true };
 }
 
 export default function Home() {
@@ -59,7 +61,7 @@ export default function Home() {
   const roomCode = activeRoom || "GOLF-DEMO";
 
   useEffect(() => {
-    setGame(makeGame(3));
+    setGame(makeGame(3, false));
   }, []);
 
   useEffect(() => {
@@ -92,7 +94,7 @@ export default function Home() {
   }, [game, activeRoom]);
 
   const start = (players = count) => {
-    setGame(makeGame(players, true, profileName.trim() || "You")); setHeld(null); setSource(null); setRevealed(false); setNotice("New round — draw a card to begin.");
+    setGame((current) => activeRoom ? dealRound(current) : makeGame(players, true, profileName.trim() || "You")); setHeld(null); setSource(null); setRevealed(false); setNotice("New round — draw a card to begin.");
   };
   const enterGame = async (event: React.FormEvent, joining = false) => {
     event.preventDefault();
@@ -100,7 +102,7 @@ export default function Home() {
     setConnectionError("");
     if (!joining) {
       const code = `GOLF-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-      const newGame = makeGame(3, true, profileName.trim());
+      const newGame = makeGame(count, true, profileName.trim());
       const { error } = await supabase.from("golf_rooms").insert({ code, state: newGame });
       if (error) { setConnectionError("Couldn’t create a table. Please try again."); return; }
       setGame(newGame); setLocalPlayer(0); setActiveRoom(code); setScreen("game"); return;
@@ -109,12 +111,13 @@ export default function Home() {
     const { data, error } = await supabase.from("golf_rooms").select("state").eq("code", code).single();
     if (error || !data) { setConnectionError("That room code wasn’t found."); return; }
     const roomGame = data.state as Game;
-    const seat = roomGame.players.findIndex((player) => player.name === "Maya" || player.name === "Noah" || player.name === "Jules");
-    if (seat === -1) { setConnectionError("That table is already full."); return; }
-    const joinedGame: Game = { ...roomGame, players: roomGame.players.map((player, index) => index === seat ? { ...player, name: profileName.trim() } : player) };
+    if (roomGame.started) { setConnectionError("That game has already started."); return; }
+    if (roomGame.players.length >= roomGame.maxPlayers) { setConnectionError("That table is already full."); return; }
+    const seat = roomGame.players.length;
+    const joinedGame: Game = { ...roomGame, players: [...roomGame.players, { name: profileName.trim(), cards: [], topUsed: [false, false], score: 0 }] };
     const { error: updateError } = await supabase.from("golf_rooms").update({ state: joinedGame, updated_at: new Date().toISOString() }).eq("code", code);
     if (updateError) { setConnectionError("Couldn’t join that table. Please try again."); return; }
-    setGame(joinedGame); setCount(joinedGame.players.length); setLocalPlayer(seat); setActiveRoom(code); setScreen("game");
+    setGame(joinedGame); setCount(joinedGame.maxPlayers); setLocalPlayer(seat); setActiveRoom(code); setScreen("game");
   };
   const draw = (from: "draw" | "discard") => {
     if (held || revealed || game.turn !== localPlayer) return;
@@ -152,15 +155,20 @@ export default function Home() {
   if (screen === "landing") return <main className="landing-page">
     <nav><div className="brand"><span>⌁</span> GOLF NIGHT</div><div className="room">A CARD GAME FOR 2–4 FRIENDS</div></nav>
     <section className="landing-hero"><div><p className="eyebrow">Your table is waiting</p><h1>Bring your<br/><i>best game.</i></h1><p>Set up your player, then start a table or join your friends with their room code.</p><div className="mini-cards"><span>♠</span><span>♥</span><span>♦</span></div></div>
-      <form className="join-card" onSubmit={(event) => enterGame(event)}><p className="eyebrow">Step 1 of 2</p><h2>Make it yours.</h2><label>Your display name<input autoFocus maxLength={16} value={profileName} onChange={(event) => setProfileName(event.target.value)} placeholder="e.g. Ansley"/></label><span className="label">Choose an avatar</span><div className="avatar-picker">{["⛳", "🌞", "🍀", "🦋", "🌼", "🪩"].map((item) => <button type="button" aria-label={`Use ${item} avatar`} className={avatar === item ? "chosen" : ""} onClick={() => setAvatar(item)} key={item}>{item}</button>)}</div><button className="primary" disabled={!profileName.trim()} type="submit">Create a new table <span>→</span></button><div className="or"><span/>or<span/></div><label>Have a room code?<div className="join-row"><input value={roomInput} onChange={(event) => setRoomInput(event.target.value.toUpperCase())} placeholder="GOLF-XXXX"/><button type="button" onClick={(event) => enterGame(event as unknown as React.FormEvent, true)} disabled={!profileName.trim() || !roomInput.trim()}>Join</button></div></label>{connectionError && <p className="connection-error">{connectionError}</p>}<small className="form-note">Your friends can join with a room code from any device.</small></form>
+      <form className="join-card" onSubmit={(event) => enterGame(event)}><p className="eyebrow">Step 1 of 2</p><h2>Make it yours.</h2><label>Your display name<input autoFocus maxLength={16} value={profileName} onChange={(event) => setProfileName(event.target.value)} placeholder="e.g. Ansley"/></label><span className="label">Choose an avatar</span><div className="avatar-picker">{["⛳", "🌞", "🍀", "🦋", "🌼", "🪩"].map((item) => <button type="button" aria-label={`Use ${item} avatar`} className={avatar === item ? "chosen" : ""} onClick={() => setAvatar(item)} key={item}>{item}</button>)}</div><span className="label">How many people are playing?</span><div className="size-picker">{[2, 3, 4].map((size) => <button type="button" className={count === size ? "chosen" : ""} onClick={() => setCount(size)} key={size}>{size}</button>)}</div><button className="primary" disabled={!profileName.trim()} type="submit">Create a new table <span>→</span></button><div className="or"><span/>or<span/></div><label>Have a room code?<div className="join-row"><input value={roomInput} onChange={(event) => setRoomInput(event.target.value.toUpperCase())} placeholder="GOLF-XXXX"/><button type="button" onClick={(event) => enterGame(event as unknown as React.FormEvent, true)} disabled={!profileName.trim() || !roomInput.trim()}>Join</button></div></label>{connectionError && <p className="connection-error">{connectionError}</p>}<small className="form-note">Your friends can join with a room code from any device.</small></form>
     </section>
+  </main>;
+
+  if (!game.started) return <main className="lobby-page">
+    <nav><div className="brand"><span>⌁</span> GOLF NIGHT</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav>
+    <section className="waiting-room"><p className="eyebrow">Room {roomCode}</p><h1>The table is<br/><i>getting warm.</i></h1><p className="waiting-copy">Share your room code. The game begins when all {game.maxPlayers} seats are filled.</p><div className="seats">{Array.from({ length: game.maxPlayers }, (_, index) => { const player = game.players[index]; return <div className={`seat ${player ? "filled" : ""}`} key={index}><span>{player ? (index === localPlayer ? avatar : player.name[0]) : "+"}</span><b>{player?.name || "Waiting for a friend"}</b><small>{player ? "ready at the table" : "room code required"}</small></div>; })}</div>{game.players.length === game.maxPlayers ? localPlayer === 0 ? <button className="primary begin" onClick={() => start()}>Deal the cards <span>→</span></button> : <p className="host-note">Everyone&apos;s here. Waiting for the host to deal.</p> : <p className="host-note">{game.maxPlayers - game.players.length} more {game.maxPlayers - game.players.length === 1 ? "friend" : "friends"} needed.</p>}</section>
   </main>;
 
   return <main>
     <nav><div className="brand"><span>⌁</span> GOLF NIGHT</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav>
     <section className="hero"><p className="eyebrow">A four-card game for friends</p><h1>Keep your score<br/><i>under par.</i></h1><p className="sub">Draw smart. Swap wisely. The lowest total wins.</p></section>
     <section className="table">
-      <div className="table-top"><div><span className="live-dot"/> LIVE TABLE <small>• {game.players.length} PLAYERS</small></div><button className="outline" onClick={() => start()}>New game</button></div>
+      <div className="table-top"><div><span className="live-dot"/> LIVE TABLE <small>• {game.players.length} PLAYERS</small></div>{localPlayer === 0 && <button className="outline" onClick={() => start()}>New round</button>}</div>
       <div className="turn-banner"><span>✦</span><b>{revealed ? "ROUND COMPLETE" : `${game.players[game.turn].name.toUpperCase()}’S TURN`}</b><em>{notice}</em></div>
       <div className="players">
         {game.players.map((player, pIndex) => <article className={`player ${pIndex === game.turn && !revealed ? "active" : ""}`} key={player.name}>
