@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { supabase } from "../lib/supabase";
 
 type Suit = "♠" | "♥" | "♦" | "♣";
 type Card = { rank: string; suit: Suit };
 type Player = { name: string; cards: Card[]; topUsed: boolean[]; score: number };
+type Game = { players: Player[]; draw: Card[]; discard: Card[]; turn: number };
 
 const suits: Suit[] = ["♠", "♥", "♦", "♣"];
 const ranks = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
@@ -28,12 +30,12 @@ function shuffle<T>(values: T[]) {
   return next;
 }
 
-function makeGame(count: number, randomize = true) {
+function makeGame(count: number, randomize = true, localName = "You"): Game {
   const cards = suits.flatMap((suit) => ranks.map((rank) => ({ rank, suit })));
   // The first render must be identical on Next's server and in the browser.
   // Subsequent new games are shuffled from the button click.
   const deck = randomize ? shuffle(cards) : cards;
-  const players = names.slice(0, count).map((name) => ({ name, cards: deck.splice(0, 4), topUsed: [false, false], score: 0 }));
+  const players = names.slice(0, count).map((name, index) => ({ name: index === 0 ? localName : name, cards: deck.splice(0, 4), topUsed: [false, false], score: 0 }));
   return { players, draw: deck, discard: [deck.pop()!], turn: 0 };
 }
 
@@ -44,17 +46,67 @@ export default function Home() {
   const [source, setSource] = useState<"draw" | "discard" | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [notice, setNotice] = useState("Draw a card to begin.");
-  const roomCode = useMemo(() => "GOLF-DEMO", []);
+  const [screen, setScreen] = useState<"landing" | "game">("landing");
+  const [profileName, setProfileName] = useState("");
+  const [avatar, setAvatar] = useState("⛳");
+  const [roomInput, setRoomInput] = useState("");
+  const [activeRoom, setActiveRoom] = useState("");
+  const [localPlayer, setLocalPlayer] = useState(0);
+  const [connectionError, setConnectionError] = useState("");
+  const remoteChange = useRef(false);
+  const roomCode = activeRoom || "GOLF-DEMO";
 
   useEffect(() => {
     setGame(makeGame(3));
   }, []);
 
+  useEffect(() => {
+    if (!activeRoom) return;
+    const channel = supabase.channel(`golf-room-${activeRoom}`).on(
+      "postgres_changes",
+      { event: "UPDATE", schema: "public", table: "golf_rooms", filter: `code=eq.${activeRoom}` },
+      ({ new: updated }) => {
+        const state = updated.state as Game;
+        remoteChange.current = true;
+        setGame(state);
+      }
+    ).subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [activeRoom]);
+
+  useEffect(() => {
+    if (!activeRoom) return;
+    if (remoteChange.current) { remoteChange.current = false; return; }
+    void supabase.from("golf_rooms").update({ state: game, updated_at: new Date().toISOString() }).eq("code", activeRoom);
+  }, [game, activeRoom]);
+
   const start = (players = count) => {
-    setGame(makeGame(players)); setHeld(null); setSource(null); setRevealed(false); setNotice("New round — draw a card to begin.");
+    setGame(makeGame(players, true, profileName.trim() || "You")); setHeld(null); setSource(null); setRevealed(false); setNotice("New round — draw a card to begin.");
+  };
+  const enterGame = async (event: React.FormEvent, joining = false) => {
+    event.preventDefault();
+    if (!profileName.trim() || (joining && !roomInput.trim())) return;
+    setConnectionError("");
+    if (!joining) {
+      const code = `GOLF-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const newGame = makeGame(3, true, profileName.trim());
+      const { error } = await supabase.from("golf_rooms").insert({ code, state: newGame });
+      if (error) { setConnectionError("Couldn’t create a table. Please try again."); return; }
+      setGame(newGame); setLocalPlayer(0); setActiveRoom(code); setScreen("game"); return;
+    }
+    const code = roomInput.trim().toUpperCase();
+    const { data, error } = await supabase.from("golf_rooms").select("state").eq("code", code).single();
+    if (error || !data) { setConnectionError("That room code wasn’t found."); return; }
+    const roomGame = data.state as Game;
+    const seat = roomGame.players.findIndex((player) => player.name === "Maya" || player.name === "Noah" || player.name === "Jules");
+    if (seat === -1) { setConnectionError("That table is already full."); return; }
+    const joinedGame: Game = { ...roomGame, players: roomGame.players.map((player, index) => index === seat ? { ...player, name: profileName.trim() } : player) };
+    const { error: updateError } = await supabase.from("golf_rooms").update({ state: joinedGame, updated_at: new Date().toISOString() }).eq("code", code);
+    if (updateError) { setConnectionError("Couldn’t join that table. Please try again."); return; }
+    setGame(joinedGame); setCount(joinedGame.players.length); setLocalPlayer(seat); setActiveRoom(code); setScreen("game");
   };
   const draw = (from: "draw" | "discard") => {
-    if (held || revealed) return;
+    if (held || revealed || game.turn !== localPlayer) return;
     if (from === "draw" && game.draw.length === 0) { finish(); return; }
     const pile = from === "draw" ? game.draw : game.discard;
     if (!pile.length) return;
@@ -68,13 +120,13 @@ export default function Home() {
     setNotice("Draw pile empty — cards revealed and scores added.");
   };
   const discardHeld = () => {
-    if (!held) return;
+    if (!held || game.turn !== localPlayer) return;
     const finalDraw = game.draw.length === 0;
     setGame((g) => ({ ...g, discard: [...g.discard, held], turn: (g.turn + 1) % g.players.length, players: finalDraw ? g.players.map((p) => ({ ...p, score: p.score + p.cards.reduce((total, c) => total + cardValue(c), 0) })) : g.players }));
     setHeld(null); setSource(null); setRevealed(finalDraw); setNotice(finalDraw ? "Draw pile empty — cards revealed and scores added." : "Card discarded. Next player’s turn.");
   };
   const swap = (playerIndex: number, cardIndex: number) => {
-    if (!held || playerIndex !== game.turn || revealed) return;
+    if (!held || playerIndex !== game.turn || playerIndex !== localPlayer || revealed) return;
     const isTop = cardIndex < 2;
     if (isTop && game.players[playerIndex].topUsed[cardIndex]) { setNotice("That top card has already been swapped once."); return; }
     const old = game.players[playerIndex].cards[cardIndex];
@@ -86,6 +138,13 @@ export default function Home() {
     setHeld(null); setSource(null); setRevealed(finalDraw); setNotice(finalDraw ? "Draw pile empty — cards revealed and scores added." : "Swap complete. Next player’s turn.");
   };
 
+  if (screen === "landing") return <main className="landing-page">
+    <nav><div className="brand"><span>⌁</span> GOLF NIGHT</div><div className="room">A CARD GAME FOR 2–4 FRIENDS</div></nav>
+    <section className="landing-hero"><div><p className="eyebrow">Your table is waiting</p><h1>Bring your<br/><i>best game.</i></h1><p>Set up your player, then start a table or join your friends with their room code.</p><div className="mini-cards"><span>♠</span><span>♥</span><span>♦</span></div></div>
+      <form className="join-card" onSubmit={(event) => enterGame(event)}><p className="eyebrow">Step 1 of 2</p><h2>Make it yours.</h2><label>Your display name<input autoFocus maxLength={16} value={profileName} onChange={(event) => setProfileName(event.target.value)} placeholder="e.g. Ansley"/></label><span className="label">Choose an avatar</span><div className="avatar-picker">{["⛳", "🌞", "🍀", "🦋", "🌼", "🪩"].map((item) => <button type="button" aria-label={`Use ${item} avatar`} className={avatar === item ? "chosen" : ""} onClick={() => setAvatar(item)} key={item}>{item}</button>)}</div><button className="primary" disabled={!profileName.trim()} type="submit">Create a new table <span>→</span></button><div className="or"><span/>or<span/></div><label>Have a room code?<div className="join-row"><input value={roomInput} onChange={(event) => setRoomInput(event.target.value.toUpperCase())} placeholder="GOLF-XXXX"/><button type="button" onClick={(event) => enterGame(event as unknown as React.FormEvent, true)} disabled={!profileName.trim() || !roomInput.trim()}>Join</button></div></label>{connectionError && <p className="connection-error">{connectionError}</p>}<small className="form-note">Your friends can join with a room code from any device.</small></form>
+    </section>
+  </main>;
+
   return <main>
     <nav><div className="brand"><span>⌁</span> GOLF NIGHT</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav>
     <section className="hero"><p className="eyebrow">A four-card game for friends</p><h1>Keep your score<br/><i>under par.</i></h1><p className="sub">Draw smart. Swap wisely. The lowest total wins.</p></section>
@@ -94,19 +153,19 @@ export default function Home() {
       <div className="turn-banner"><span>✦</span><b>{revealed ? "ROUND COMPLETE" : `${game.players[game.turn].name.toUpperCase()}’S TURN`}</b><em>{notice}</em></div>
       <div className="players">
         {game.players.map((player, pIndex) => <article className={`player ${pIndex === game.turn && !revealed ? "active" : ""}`} key={player.name}>
-          <header><div className="avatar">{player.name[0]}</div><div><b>{player.name}</b><small>{pIndex === game.turn && !revealed ? "playing now" : "at the table"}</small></div><strong>{player.score} <small>PTS</small></strong></header>
+          <header><div className="avatar">{pIndex === localPlayer ? avatar : player.name[0]}</div><div><b>{player.name}</b><small>{pIndex === game.turn && !revealed ? "playing now" : "at the table"}</small></div><strong>{player.score} <small>PTS</small></strong></header>
           <div className="cards">{player.cards.map((card, cIndex) => {
-            const visible = revealed || (pIndex === 0 && cIndex >= 2) || (pIndex === 0 && cIndex < 2 && player.topUsed[cIndex]);
+            const visible = revealed || (pIndex === localPlayer && cIndex >= 2) || (pIndex === localPlayer && cIndex < 2 && player.topUsed[cIndex]);
             const sideways = cIndex < 2 && player.topUsed[cIndex];
-            return <button aria-label={`${player.name} card ${cIndex + 1}`} disabled={!held || pIndex !== game.turn} onClick={() => swap(pIndex, cIndex)} className={`card ${visible ? suitColor(card.suit) : "back"} ${sideways ? "sideways" : ""}`} key={cIndex}>{visible ? <CardFace card={card}/> : <span className="back-mark">✦</span>}</button>;
+            return <button aria-label={`${player.name} card ${cIndex + 1}`} disabled={!held || pIndex !== game.turn || pIndex !== localPlayer} onClick={() => swap(pIndex, cIndex)} className={`card ${visible ? suitColor(card.suit) : "back"} ${sideways ? "sideways" : ""}`} key={cIndex}>{visible ? <CardFace card={card}/> : <span className="back-mark">✦</span>}</button>;
           })}</div>
           {revealed && <p className="round-score">Round: {player.cards.reduce((total, c) => total + cardValue(c), 0)}</p>}
         </article>)}
       </div>
       <div className="piles">
-        <button className="pile draw" onClick={() => draw("draw")} disabled={!!held || revealed}><span className="stack one"/><span className="stack two"/><span className="card back">✦</span><b>DRAW</b><small>{game.draw.length} cards</small></button>
+        <button className="pile draw" onClick={() => draw("draw")} disabled={!!held || revealed || game.turn !== localPlayer}><span className="stack one"/><span className="stack two"/><span className="card back">✦</span><b>DRAW</b><small>{game.draw.length} cards</small></button>
         <div className="held"><span>IN HAND</span>{held ? <div className={`card ${suitColor(held.suit)}`}><CardFace card={held}/></div> : <div className="empty">—</div>} {held && <button className="discard-button" onClick={discardHeld}>Discard card</button>}</div>
-        <button className="pile" onClick={() => draw("discard")} disabled={!!held || revealed}><span className={`card ${suitColor(game.discard.at(-1)!.suit)}`}><CardFace card={game.discard.at(-1)!}/></span><b>DISCARD</b><small>pick up top card</small></button>
+        <button className="pile" onClick={() => draw("discard")} disabled={!!held || revealed || game.turn !== localPlayer}><span className={`card ${suitColor(game.discard.at(-1)!.suit)}`}><CardFace card={game.discard.at(-1)!}/></span><b>DISCARD</b><small>pick up top card</small></button>
       </div>
     </section>
     <section className="how"><div><p className="eyebrow">How to play</p><h2>Small cards. Big moves.</h2></div><div className="rules"><p><b>01</b> Your bottom two cards are always visible to you.</p><p><b>02</b> Draw or take discard, then swap—or discard.</p><p><b>03</b> Top cards can be swapped once, then turn sideways.</p><p><b>04</b> When the draw pile empties, lowest total wins.</p></div></section>
