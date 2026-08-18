@@ -120,6 +120,54 @@ export function validatePhase(phase: PhaseNumber, melds: Meld[]): Validation {
 }
 export const isValidPhase = (phase: PhaseNumber, melds: Meld[]) => validatePhase(phase, melds).valid;
 
+export function phaseMeldSizes(phase: PhaseNumber): number[] {
+  switch (phase) {
+    case 1: return [3, 3];
+    case 2:
+    case 3: return [3, 4];
+    case 4: return [7];
+    case 5: return [8];
+    case 6: return [9];
+    case 7: return [4, 4];
+    case 8: return [7];
+    case 9: return [5, 2];
+    case 10: return [5, 3];
+  }
+}
+
+function phaseMeldKinds(phase: PhaseNumber): Array<"set" | "run" | "color"> {
+  if (phase === 8) return ["color"];
+  if (phase === 1 || phase === 7 || phase === 9) return ["set", "set"];
+  if (phase === 2 || phase === 3 || phase === 10) return ["set", "run"];
+  return ["run"];
+}
+
+function combinations<T>(items: T[], size: number): T[][] {
+  if (size === 0) return [[]];
+  if (items.length < size) return [];
+  const [first, ...rest] = items;
+  return combinations(rest, size - 1).map((choice) => [first, ...choice])
+    .concat(combinations(rest, size));
+}
+
+export function findPhaseMelds(phase: PhaseNumber, cards: Meld): Meld[] | null {
+  const sizes = phaseMeldSizes(phase);
+  const kinds = phaseMeldKinds(phase);
+  if (cards.length !== sizes.reduce((sum, size) => sum + size, 0)) return null;
+  const search = (remaining: Meld, index: number): Meld[] | null => {
+    if (index === sizes.length) return remaining.length === 0 ? [] : null;
+    for (const choice of combinations(remaining, sizes[index])) {
+      const validation = validateMeld(choice, kinds[index], sizes[index]);
+      if (!validation.valid) continue;
+      const choiceIds = new Set(choice.map((card) => card.id));
+      const next = search(remaining.filter((card) => !choiceIds.has(card.id)), index + 1);
+      if (next) return [choice, ...next];
+    }
+    return null;
+  };
+  return search(cards, 0);
+}
+
 export function cardScore(card: Card): number { return card.kind === "wild" ? 25 : card.kind === "skip" ? 15 : card.value! <= 9 ? 5 : 10; }
 export const scoreCards = (cards: readonly Card[]) => cards.reduce((sum, c) => sum + cardScore(c), 0);
 
