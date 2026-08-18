@@ -24,6 +24,7 @@ export type PlayerState = {
   avatar?: string;
   hand: Card[];
   phase: PhaseNumber;
+  phaseComplete?: boolean;
   score: number;
   laidPhase: PhaseMeld[] | null;
   hits: number;
@@ -69,7 +70,7 @@ export function createGame(playerIds: readonly PlayerId[], random: () => number 
   if (playerIds.length < 2 || playerIds.length > 4) return fail("Phase 10 requires 2 to 4 players.");
   if (new Set(playerIds).size !== playerIds.length) return fail("Player IDs must be unique.");
   const deck = shuffle(createDeck(), random);
-  const players = playerIds.map((id) => ({ id, hand: deck.splice(0, 10), phase: 1 as PhaseNumber, score: 0, laidPhase: null, hits: 0, skipped: false }));
+  const players = playerIds.map((id) => ({ id, hand: deck.splice(0, 10), phase: 1 as PhaseNumber, phaseComplete: false, score: 0, laidPhase: null, hits: 0, skipped: false }));
   return ok({ players, drawPile: deck.slice(0, -1), discardPile: [deck[deck.length - 1]], currentPlayer: 0, turnHasDrawn: false, status: "playing", skipTarget: null, round: 1 });
 }
 export const createGameState = createGame;
@@ -213,7 +214,7 @@ export function layPhase(state: GameState, melds: Meld[]): Result<GameState> {
     p.phase === 1 || p.phase === 7 || p.phase === 9 ? ["set", "set"] :
     p.phase === 2 ? ["set", "run"] : p.phase === 3 ? ["set", "run"] :
     p.phase === 10 ? ["set", "run"] : ["run"];
-  return ok(replacePlayer(state, state.currentPlayer, { ...p, hand, laidPhase: melds.map((cards, i) => ({ id: `${p.id}-phase-${i}`, kind: kinds[i], cards: [...cards] })) }));
+  return ok(replacePlayer(state, state.currentPlayer, { ...p, hand, phaseComplete: true, laidPhase: melds.map((cards, i) => ({ id: `${p.id}-phase-${i}`, kind: kinds[i], cards: [...cards] })) }));
 }
 export function validateHit(card: Card, meld: Meld, kind?: "set" | "run" | "color"): Validation {
   if (card.kind === "skip" || meld.some((c) => c.kind === "skip")) return { valid: false, error: "Skip cards cannot be hit." };
@@ -255,9 +256,12 @@ export function useSkip(state: GameState, targetId: PlayerId): Result<GameState>
 export function nextRound(state: GameState): Result<GameState> {
   if (state.status !== "round-over") return fail("The round is not over.");
   const completedFinalPhase = state.winnerId
-    ? state.players.find((p) => p.id === state.winnerId)?.phase === 10
+    ? (() => {
+      const winner = state.players.find((p) => p.id === state.winnerId);
+      return winner?.phase === 10 && winner.phaseComplete === true;
+    })()
     : false;
-  const players = state.players.map((p) => ({ ...p, phase: (p.laidPhase ? Math.min(10, p.phase + 1) : p.phase) as PhaseNumber, score: p.score + scoreCards(p.hand), hand: [], laidPhase: null, hits: 0, skipped: false }));
+  const players = state.players.map((p) => ({ ...p, phase: (p.phaseComplete ? Math.min(10, p.phase + 1) : p.phase) as PhaseNumber, phaseComplete: false, score: p.score + scoreCards(p.hand), hand: [], laidPhase: null, hits: 0, skipped: false }));
   if (completedFinalPhase) {
     return ok({ ...state, players, status: "game-over" });
   }

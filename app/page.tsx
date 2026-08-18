@@ -46,7 +46,7 @@ function dealGolf(state: GolfState): GolfState {
 function makePhase(count: number, name = "You", avatar = "⛳"): PhaseRoomState {
   return {
     game: "phase10", maxPlayers: count, started: false, players: [{
-      id: "p0", name, avatar, hand: [], phase: 1, score: 0, laidPhase: null, hits: 0, skipped: false,
+      id: "p0", name, avatar, hand: [], phase: 1, phaseComplete: false, score: 0, laidPhase: null, hits: 0, skipped: false,
     }], drawPile: [], discardPile: [], currentPlayer: 0, turnHasDrawn: false, status: "playing", skipTarget: null, round: 1,
   };
 }
@@ -140,7 +140,7 @@ export default function Home() {
     const id = `p${roomState.players.length}`;
     const player = gameType === "golf"
       ? { id, name: name.trim(), avatar, cards: [], topUsed: [false, false], score: 0 }
-      : { id, name: name.trim(), avatar, hand: [], phase: 1 as const, score: 0, laidPhase: null, hits: 0, skipped: false };
+      : { id, name: name.trim(), avatar, hand: [], phase: 1 as const, phaseComplete: false, score: 0, laidPhase: null, hits: 0, skipped: false };
     const joined = { ...roomState, players: [...roomState.players, player] } as RoomState;
     const { error: updateError } = await supabase.from("golf_rooms").update({ state: joined, updated_at: new Date().toISOString() }).eq("code", code);
     if (updateError) { setError("Could not join that table."); return; }
