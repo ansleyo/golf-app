@@ -3,24 +3,25 @@
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "../lib/supabase";
 import type { RealtimeChannel } from "@supabase/supabase-js";
+import {
+  COLORS, PHASES, type Card as PhaseCard, type GameState as PhaseState,
+  deal as dealPhaseGame, reduceGame,
+} from "../lib/phase10";
 
-type Suit = "♠" | "♥" | "♦" | "♣";
-type Card = { rank: string; suit: Suit };
-type Player = { name: string; avatar: string; cards: Card[]; topUsed: boolean[]; score: number };
-type Game = { players: Player[]; draw: Card[]; discard: Card[]; turn: number; maxPlayers: number; started: boolean };
+type GameType = "golf" | "phase10";
+type GolfCard = { id: string; rank: string; suit: "♠" | "♥" | "♦" | "♣" };
+type GolfPlayer = { id: string; name: string; avatar: string; cards: GolfCard[]; topUsed: boolean[]; score: number };
+type GolfState = { game: "golf"; players: GolfPlayer[]; draw: GolfCard[]; discard: GolfCard[]; turn: number; maxPlayers: number; started: boolean; revealed?: boolean };
+type PhaseRoomState = PhaseState & { game: "phase10"; maxPlayers: number; started: boolean };
+type RoomState = GolfState | PhaseRoomState;
 
-const suits: Suit[] = ["♠", "♥", "♦", "♣"];
+const suits: GolfCard["suit"][] = ["♠", "♥", "♦", "♣"];
 const ranks = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
-const names = ["You", "Maya", "Noah", "Jules"];
-const cardValue = (card: Card) => card.rank === "A" ? 1 : card.rank === "K" ? 0 : Number(card.rank) || 10;
-const suitColor = (suit: Suit) => suit === "♥" || suit === "♦" ? "red" : "black";
-function CardFace({ card }: { card: Card }) {
-  return <>
-    <span className="corner corner-top">{card.rank}</span>
-    <span className="single-suit">{card.suit}</span>
-    <span className="corner corner-bottom">{card.rank}</span>
-  </>;
-}
+const avatars = ["🍺", "💩", "🤠", "👽", "🍸", "67"];
+const golfValue = (card: GolfCard) => card.rank === "A" ? 1 : card.rank === "K" ? 0 : Number(card.rank) || 10;
+const golfColor = (suit: GolfCard["suit"]) => suit === "♥" || suit === "♦" ? "red" : "black";
+const phaseColor = (card: PhaseCard) => card.kind === "wild" ? "wild" : card.kind === "skip" ? "skip" : card.color;
+const cardLabel = (card: PhaseCard) => card.kind === "wild" ? "WILD" : card.kind === "skip" ? "SKIP" : String(card.value);
 
 function shuffle<T>(values: T[]) {
   const next = [...values];
@@ -31,163 +32,163 @@ function shuffle<T>(values: T[]) {
   return next;
 }
 
-function makeGame(count: number, _randomize = true, localName = "You", localAvatar = "⛳"): Game {
-  const cards = suits.flatMap((suit) => ranks.map((rank) => ({ rank, suit })));
-  return { players: [{ name: localName, avatar: localAvatar, cards: [], topUsed: [false, false], score: 0 }], draw: cards, discard: [], turn: 0, maxPlayers: count, started: false };
+function makeGolf(count: number, name = "You", avatar = "⛳"): GolfState {
+  const cards = suits.flatMap((suit) => ranks.map((rank, i) => ({ rank, suit, id: `${suit}-${rank}-${i}` })));
+  return { game: "golf", players: [{ id: "p0", name, avatar, cards: [], topUsed: [false, false], score: 0 }], draw: cards, discard: [], turn: 0, maxPlayers: count, started: false };
 }
 
-function dealRound(game: Game): Game {
-  const deck = shuffle(suits.flatMap((suit) => ranks.map((rank) => ({ rank, suit }))));
-  const players = game.players.map((player) => ({ ...player, cards: deck.splice(0, 4), topUsed: [false, false] }));
-  return { ...game, players, draw: deck, discard: [deck.pop()!], turn: 0, started: true };
+function dealGolf(state: GolfState): GolfState {
+  const deck = shuffle(suits.flatMap((suit) => ranks.map((rank, i) => ({ rank, suit, id: `${suit}-${rank}-${i}-${Math.random()}` }))));
+  const players = state.players.map((player) => ({ ...player, cards: deck.splice(0, 4), topUsed: [false, false] }));
+  return { ...state, players, draw: deck, discard: [deck.pop()!], turn: 0, started: true, revealed: false };
+}
+
+function makePhase(count: number, name = "You", avatar = "⛳"): PhaseRoomState {
+  return {
+    game: "phase10", maxPlayers: count, started: false, players: [{
+      id: "p0", name, avatar, hand: [], phase: 1, score: 0, laidPhase: null, hits: 0, skipped: false,
+    }], drawPile: [], discardPile: [], currentPlayer: 0, turnHasDrawn: false, status: "playing", skipTarget: null, round: 1,
+  };
+}
+
+function dealPhase(state: PhaseRoomState): PhaseRoomState {
+  const result = dealPhaseGame(state.players.map((p) => p.id));
+  if (!result.ok) throw new Error(result.error);
+  return { ...result.state!, game: "phase10", maxPlayers: state.maxPlayers, started: true, players: result.state!.players.map((p, i) => ({ ...p, name: state.players[i].name, avatar: state.players[i].avatar })) };
+}
+
+function GolfCardFace({ card }: { card: GolfCard }) {
+  return <><span className="corner">{card.rank}</span><span className="single-suit">{card.suit}</span><span className="corner corner-bottom">{card.rank}</span></>;
+}
+
+function PhaseCardFace({ card }: { card: PhaseCard }) {
+  return <><span className="phase-card-label">{cardLabel(card)}</span>{card.kind === "number" && <span className="phase-card-dot">●</span>}</>;
 }
 
 export default function Home() {
+  const [gameType, setGameType] = useState<GameType>("golf");
   const [count, setCount] = useState(3);
-  const [game, setGame] = useState(() => makeGame(3, false));
-  const [held, setHeld] = useState<Card | null>(null);
-  const [source, setSource] = useState<"draw" | "discard" | null>(null);
-  const [revealed, setRevealed] = useState(false);
-  const [notice, setNotice] = useState("Draw a card to begin.");
-  const [screen, setScreen] = useState<"landing" | "game">("landing");
-  const [profileName, setProfileName] = useState("");
-  const [avatar, setAvatar] = useState("⛳");
+  const [state, setState] = useState<RoomState>(() => makeGolf(3));
+  const [screen, setScreen] = useState<"landing" | "room">("landing");
+  const [name, setName] = useState("");
+  const [avatar, setAvatar] = useState("🍺");
   const [roomInput, setRoomInput] = useState("");
   const [activeRoom, setActiveRoom] = useState("");
   const [localPlayer, setLocalPlayer] = useState(0);
-  const [connectionError, setConnectionError] = useState("");
+  const [heldGolf, setHeldGolf] = useState<GolfCard | null>(null);
+  const [selectedPhase, setSelectedPhase] = useState<string[]>([]);
+  const [notice, setNotice] = useState("Draw a card to begin.");
+  const [error, setError] = useState("");
   const remoteChange = useRef(false);
-  const roomChannel = useRef<RealtimeChannel | null>(null);
-  const roomCode = activeRoom || "GOLF-DEMO";
+  const channel = useRef<RealtimeChannel | null>(null);
+  const roomCode = activeRoom || `${gameType === "golf" ? "GOLF" : "PHASE"}-DEMO`;
 
   useEffect(() => {
-    setGame(makeGame(3, false));
-  }, []);
+    setState(gameType === "golf" ? makeGolf(count) : makePhase(count));
+    setHeldGolf(null); setSelectedPhase([]);
+  }, [gameType, count]);
 
   useEffect(() => {
     if (!activeRoom) return;
-    const applyRemoteState = (state: Game) => {
-      remoteChange.current = true;
-      setGame(state);
-    };
-    const channel = supabase.channel(`golf-room-${activeRoom}`).on(
-      "broadcast",
-      { event: "game-state" },
-      ({ payload }) => applyRemoteState(payload.state as Game)
-    ).on(
-      "postgres_changes",
-      { event: "UPDATE", schema: "public", table: "golf_rooms", filter: `code=eq.${activeRoom}` },
-      ({ new: updated }) => {
-        const state = updated.state as Game;
-        applyRemoteState(state);
-      }
+    const apply = (incoming: RoomState) => { remoteChange.current = true; setState(incoming); };
+    const roomChannel = supabase.channel(`card-room-${activeRoom}`).on("broadcast", { event: "game-state" }, ({ payload }) => apply(payload.state as RoomState)).on(
+      "postgres_changes", { event: "UPDATE", schema: "public", table: "golf_rooms", filter: `code=eq.${activeRoom}` },
+      ({ new: updated }) => apply(updated.state as RoomState),
     ).subscribe();
-    roomChannel.current = channel;
-    return () => { roomChannel.current = null; supabase.removeChannel(channel); };
+    channel.current = roomChannel;
+    return () => { channel.current = null; supabase.removeChannel(roomChannel); };
   }, [activeRoom]);
 
   useEffect(() => {
     if (!activeRoom) return;
     if (remoteChange.current) { remoteChange.current = false; return; }
-    void supabase.from("golf_rooms").update({ state: game, updated_at: new Date().toISOString() }).eq("code", activeRoom);
-    void roomChannel.current?.send({ type: "broadcast", event: "game-state", payload: { state: game } });
-  }, [game, activeRoom]);
+    void supabase.from("golf_rooms").update({ state, updated_at: new Date().toISOString() }).eq("code", activeRoom);
+    void channel.current?.send({ type: "broadcast", event: "game-state", payload: { state } });
+  }, [state, activeRoom]);
 
-  const start = (players = count) => {
-    setGame((current) => activeRoom ? dealRound(current) : makeGame(players, true, profileName.trim() || "You", avatar)); setHeld(null); setSource(null); setRevealed(false); setNotice("New round — draw a card to begin.");
+  const resetLocalTurn = () => { setHeldGolf(null); setSelectedPhase([]); };
+  const updatePhase = (action: Parameters<typeof reduceGame>[1]) => {
+    if (state.game !== "phase10") return;
+    const result = reduceGame(state, action);
+    if (!result.ok) { setNotice(result.error); return; }
+    setState({ ...result.state!, game: "phase10", maxPlayers: state.maxPlayers, started: true }); resetLocalTurn();
   };
-  const enterGame = async (event: React.FormEvent, joining = false) => {
-    event.preventDefault();
-    if (!profileName.trim() || (joining && !roomInput.trim())) return;
-    setConnectionError("");
-    if (!joining) {
-      const code = `GOLF-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-      const newGame = makeGame(count, true, profileName.trim(), avatar);
-      const { error } = await supabase.from("golf_rooms").insert({ code, state: newGame });
-      if (error) { setConnectionError("Couldn’t create a table. Please try again."); return; }
-      setGame(newGame); setLocalPlayer(0); setActiveRoom(code); setScreen("game"); return;
+  const hitPhase = (targetPlayerId: string, meldId: string) => {
+    if (state.game !== "phase10" || selectedPhase.length !== 1) return;
+    updatePhase({ type: "hit", targetPlayerId, meldId, cardId: selectedPhase[0] });
+  };
+
+  const enterRoom = async (join: boolean) => {
+    if (!name.trim() || (join && !roomInput.trim())) return;
+    setError("");
+    if (!join) {
+      const code = `${gameType === "golf" ? "GOLF" : "PHASE"}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const newState = gameType === "golf" ? makeGolf(count, name.trim(), avatar) : makePhase(count, name.trim(), avatar);
+      const { error: insertError } = await supabase.from("golf_rooms").insert({ code, state: newState });
+      if (insertError) { setError("Could not create a table. Check the Supabase setup."); return; }
+      setState(newState); setLocalPlayer(0); setActiveRoom(code); setScreen("room"); return;
     }
     const code = roomInput.trim().toUpperCase();
-    const { data, error } = await supabase.from("golf_rooms").select("state").eq("code", code).single();
-    if (error || !data) { setConnectionError("That room code wasn’t found."); return; }
-    const roomGame = data.state as Game;
-    if (roomGame.started) { setConnectionError("That game has already started."); return; }
-    if (roomGame.players.length >= roomGame.maxPlayers) { setConnectionError("That table is already full."); return; }
-    const seat = roomGame.players.length;
-    const joinedGame: Game = { ...roomGame, players: [...roomGame.players, { name: profileName.trim(), avatar, cards: [], topUsed: [false, false], score: 0 }] };
-    const { error: updateError } = await supabase.from("golf_rooms").update({ state: joinedGame, updated_at: new Date().toISOString() }).eq("code", code);
-    if (updateError) { setConnectionError("Couldn’t join that table. Please try again."); return; }
-    setGame(joinedGame); setCount(joinedGame.maxPlayers); setLocalPlayer(seat); setActiveRoom(code); setScreen("game");
+    const { data, error: readError } = await supabase.from("golf_rooms").select("state").eq("code", code).single();
+    if (readError || !data) { setError("That room code was not found."); return; }
+    const roomState = data.state as RoomState;
+    if (roomState.game !== gameType) { setError("That room is for a different game."); return; }
+    if (roomState.started) { setError("That game has already started."); return; }
+    if (roomState.players.length >= roomState.maxPlayers) { setError("That table is already full."); return; }
+    const id = `p${roomState.players.length}`;
+    const player = gameType === "golf"
+      ? { id, name: name.trim(), avatar, cards: [], topUsed: [false, false], score: 0 }
+      : { id, name: name.trim(), avatar, hand: [], phase: 1 as const, score: 0, laidPhase: null, hits: 0, skipped: false };
+    const joined = { ...roomState, players: [...roomState.players, player] } as RoomState;
+    const { error: updateError } = await supabase.from("golf_rooms").update({ state: joined, updated_at: new Date().toISOString() }).eq("code", code);
+    if (updateError) { setError("Could not join that table."); return; }
+    setState(joined); setCount(roomState.maxPlayers); setLocalPlayer(roomState.players.length); setActiveRoom(code); setScreen("room");
   };
-  const draw = (from: "draw" | "discard") => {
-    if (held || revealed || game.turn !== localPlayer) return;
-    if (from === "draw" && game.draw.length === 0) { finish(); return; }
-    const pile = from === "draw" ? game.draw : game.discard;
+
+  const start = () => {
+    try {
+      setState(state.game === "golf" ? dealGolf(state) : dealPhase(state));
+      resetLocalTurn(); setNotice(state.game === "golf" ? "Draw a card to begin." : "Draw a card, then complete your phase.");
+    } catch (caught) { setNotice(caught instanceof Error ? caught.message : "Could not deal the cards."); }
+  };
+
+  const drawGolf = (from: "draw" | "discard") => {
+    if (state.game !== "golf" || heldGolf || state.revealed || state.turn !== localPlayer) return;
+    const pile = from === "draw" ? state.draw : state.discard;
     if (!pile.length) return;
     const card = pile[pile.length - 1];
-    setGame((g) => ({ ...g, [from]: g[from].slice(0, -1) }));
-    setHeld(card); setSource(from); setNotice("Swap it into a card position, or discard it.");
+    setState({ ...state, [from]: pile.slice(0, -1) });
+    setHeldGolf(card); setNotice("Swap it into a position or discard it.");
   };
-  const finish = () => {
-    setRevealed(true); setHeld(null); setSource(null);
-    setGame((g) => ({ ...g, players: g.players.map((p) => ({ ...p, score: p.score + p.cards.reduce((total, c) => total + cardValue(c), 0) })) }));
-    setNotice("Draw pile empty — cards revealed and scores added.");
-  };
-  const discardHeld = () => {
-    if (!held || game.turn !== localPlayer) return;
-    const finalDraw = game.draw.length === 0;
-    setGame((g) => ({ ...g, discard: [...g.discard, held], turn: (g.turn + 1) % g.players.length, players: finalDraw ? g.players.map((p) => ({ ...p, score: p.score + p.cards.reduce((total, c) => total + cardValue(c), 0) })) : g.players }));
-    setHeld(null); setSource(null); setRevealed(finalDraw); setNotice(finalDraw ? "Draw pile empty — cards revealed and scores added." : "Card discarded. Next player’s turn.");
-  };
-  const swap = (playerIndex: number, cardIndex: number) => {
-    if (!held || playerIndex !== game.turn || playerIndex !== localPlayer || revealed) return;
-    const isTop = cardIndex < 2;
-    if (isTop && game.players[playerIndex].topUsed[cardIndex]) { setNotice("That top card has already been swapped once."); return; }
-    const old = game.players[playerIndex].cards[cardIndex];
-    const finalDraw = game.draw.length === 0;
-    setGame((g) => ({ ...g, discard: [...g.discard, old], turn: (g.turn + 1) % g.players.length, players: g.players.map((p, pIndex) => {
-      const updated = pIndex !== playerIndex ? p : { ...p, cards: p.cards.map((c, i) => i === cardIndex ? held : c), topUsed: isTop ? p.topUsed.map((used, i) => i === cardIndex ? true : used) : p.topUsed };
-      return finalDraw ? { ...updated, score: updated.score + updated.cards.reduce((total, c) => total + cardValue(c), 0) } : updated;
-    }) }));
-    setHeld(null); setSource(null); setRevealed(finalDraw); setNotice(finalDraw ? "Draw pile empty — cards revealed and scores added." : "Swap complete. Next player’s turn.");
+  const actGolf = (cardIndex?: number) => {
+    if (state.game !== "golf" || !heldGolf || state.turn !== localPlayer) return;
+    if (cardIndex === undefined) {
+      const nextTurn = (state.turn + 1) % state.players.length;
+      setState({ ...state, discard: [...state.discard, heldGolf], turn: nextTurn });
+      resetLocalTurn(); setNotice("Discarded. Next player's turn."); return;
+    }
+    const player = state.players[localPlayer];
+    if (cardIndex < 2 && player.topUsed[cardIndex]) { setNotice("That top card was already swapped."); return; }
+    const old = player.cards[cardIndex];
+    const players = state.players.map((p, i) => i === localPlayer ? { ...p, cards: p.cards.map((card, index) => index === cardIndex ? heldGolf : card), topUsed: cardIndex < 2 ? p.topUsed.map((used, index) => index === cardIndex ? true : used) : p.topUsed } : p);
+    setState({ ...state, players, discard: [...state.discard, old], turn: (state.turn + 1) % state.players.length });
+    resetLocalTurn(); setNotice("Swap complete. Next player's turn.");
   };
 
   if (screen === "landing") return <main className="landing-page">
-    <nav><div className="brand"><span>⌁</span> GOLF NIGHT</div><div className="room">A CARD GAME FOR 2–4 FRIENDS</div></nav>
-    <section className="landing-hero"><div><p className="eyebrow">Your table is waiting</p><h1>Bring your<br/><i>best game.</i></h1><p>Set up your player, then start a table or join your friends with their room code.</p><div className="mini-cards"><span>♠</span><span>♥</span><span>♦</span></div></div>
-      <form className="join-card" onSubmit={(event) => enterGame(event)}><p className="eyebrow">Step 1 of 2</p><h2>Make it yours.</h2><label>Your display name<input autoFocus maxLength={16} value={profileName} onChange={(event) => setProfileName(event.target.value)} placeholder="e.g. Ansley"/></label><span className="label">Choose an avatar</span><div className="avatar-picker">{["🍺", "💩", "🤠", "👽", "🍸", "67"].map((item) => <button type="button" aria-label={`Use ${item} avatar`} className={avatar === item ? "chosen" : ""} onClick={() => setAvatar(item)} key={item}>{item}</button>)}</div><span className="label">How many people are playing?</span><div className="size-picker">{[2, 3, 4].map((size) => <button type="button" className={count === size ? "chosen" : ""} onClick={() => setCount(size)} key={size}>{size}</button>)}</div><button className="primary" disabled={!profileName.trim()} type="submit">Create a new table <span>→</span></button><div className="or"><span/>or<span/></div><label>Have a room code?<div className="join-row"><input value={roomInput} onChange={(event) => setRoomInput(event.target.value.toUpperCase())} placeholder="GOLF-XXXX"/><button type="button" onClick={(event) => enterGame(event as unknown as React.FormEvent, true)} disabled={!profileName.trim() || !roomInput.trim()}>Join</button></div></label>{connectionError && <p className="connection-error">{connectionError}</p>}<small className="form-note">Your friends can join with a room code from any device.</small></form>
+    <nav><div className="brand"><span>⌁</span> CARD NIGHT</div><div className="room">TWO GAMES FOR 2–4 FRIENDS</div></nav>
+    <section className="landing-hero"><div><p className="eyebrow">Your table is waiting</p><h1>Bring your<br/><i>best game.</i></h1><p>Choose a game, set up your player, then start a table or join your friends.</p><div className="game-picker"><button className={gameType === "golf" ? "chosen" : ""} onClick={() => setGameType("golf")}><b>Golf</b><small>Four cards. Lowest score.</small></button><button className={gameType === "phase10" ? "chosen" : ""} onClick={() => setGameType("phase10")}><b>Phase 10</b><small>Complete all ten phases.</small></button></div></div>
+      <div className="join-card"><p className="eyebrow">Step 1 of 2</p><h2>Make it yours.</h2><label>Your display name<input autoFocus maxLength={16} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Ansley"/></label><span className="label">Choose an avatar</span><div className="avatar-picker">{avatars.map((item) => <button type="button" aria-label={`Use ${item} avatar`} className={avatar === item ? "chosen" : ""} onClick={() => setAvatar(item)} key={item}>{item}</button>)}</div><span className="label">How many people are playing?</span><div className="size-picker">{[2, 3, 4].map((size) => <button type="button" className={count === size ? "chosen" : ""} onClick={() => setCount(size)} key={size}>{size}</button>)}</div><button className="primary" disabled={!name.trim()} onClick={() => void enterRoom(false)}>Create a {gameType === "golf" ? "Golf" : "Phase 10"} table <span>→</span></button><div className="or"><span/>or<span/></div><label>Have a room code?<div className="join-row"><input value={roomInput} onChange={(event) => setRoomInput(event.target.value.toUpperCase())} placeholder={`${gameType === "golf" ? "GOLF" : "PHASE"}-XXXX`}/><button type="button" onClick={() => void enterRoom(true)} disabled={!name.trim() || !roomInput.trim()}>Join</button></div></label>{error && <p className="connection-error">{error}</p>}<small className="form-note">Friends can join from any device with the room code.</small></div>
     </section>
   </main>;
 
-  if (!game.started) return <main className="lobby-page">
-    <nav><div className="brand"><span>⌁</span> GOLF NIGHT</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav>
-    <section className="waiting-room"><p className="eyebrow">Room {roomCode}</p><h1>The table is<br/><i>getting warm.</i></h1><p className="waiting-copy">Share your room code. The game begins when all {game.maxPlayers} seats are filled.</p><div className="seats">{Array.from({ length: game.maxPlayers }, (_, index) => { const player = game.players[index]; return <div className={`seat ${player ? "filled" : ""}`} key={index}><span>{player?.avatar || "+"}</span><b>{player?.name || "Waiting for a friend"}</b><small>{player ? "ready at the table" : "room code required"}</small></div>; })}</div>{game.players.length === game.maxPlayers ? localPlayer === 0 ? <button className="primary begin" onClick={() => start()}>Deal the cards <span>→</span></button> : <p className="host-note">Everyone&apos;s here. Waiting for the host to deal.</p> : <p className="host-note">{game.maxPlayers - game.players.length} more {game.maxPlayers - game.players.length === 1 ? "friend" : "friends"} needed.</p>}</section>
-  </main>;
+  if (!state.started) return <main className="lobby-page"><nav><div className="brand"><span>⌁</span> CARD NIGHT</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav><section className="waiting-room"><p className="eyebrow">{state.game === "golf" ? "Golf" : "Phase 10"} room {roomCode}</p><h1>The table is<br/><i>getting warm.</i></h1><p className="waiting-copy">Share the room code. The game begins when all {state.maxPlayers} seats are filled.</p><div className="seats">{Array.from({ length: state.maxPlayers }, (_, index) => { const player = state.players[index]; return <div className={`seat ${player ? "filled" : ""}`} key={index}><span>{player?.avatar || "+"}</span><b>{player?.name || "Waiting for a friend"}</b><small>{player ? "ready at the table" : "room code required"}</small></div>; })}</div>{state.players.length === state.maxPlayers ? localPlayer === 0 ? <button className="primary begin" onClick={start}>Deal the cards <span>→</span></button> : <p className="host-note">Everyone's here. Waiting for the host to deal.</p> : <p className="host-note">{state.maxPlayers - state.players.length} more friend{state.maxPlayers - state.players.length === 1 ? "" : "s"} needed.</p>}</section></main>;
 
-  return <main>
-    <nav><div className="brand"><span>⌁</span> GOLF NIGHT</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav>
-    <section className="hero"><p className="eyebrow">A four-card game for friends</p><h1>Keep your score<br/><i>under par.</i></h1><p className="sub">Draw smart. Swap wisely. The lowest total wins.</p></section>
-    <section className="table">
-      <div className="table-top"><div><span className="live-dot"/> LIVE TABLE <small>• {game.players.length} PLAYERS</small></div>{localPlayer === 0 && <button className="outline" onClick={() => start()}>New round</button>}</div>
-      <div className="turn-banner"><span>✦</span><b>{revealed ? "ROUND COMPLETE" : `${game.players[game.turn].name.toUpperCase()}’S TURN`}</b><em>{notice}</em></div>
-      <div className="players">
-        {game.players.map((player, pIndex) => <article className={`player ${pIndex === game.turn && !revealed ? "active" : ""}`} key={player.name}>
-          <header><div className="avatar">{player.avatar}</div><div><b>{player.name}</b><small>{pIndex === game.turn && !revealed ? "playing now" : "at the table"}</small></div><strong>{player.score} <small>PTS</small></strong></header>
-          <div className="cards">{player.cards.map((card, cIndex) => {
-            const visible = revealed || (pIndex === localPlayer && cIndex >= 2) || (pIndex === localPlayer && cIndex < 2 && player.topUsed[cIndex]);
-            const sideways = cIndex < 2 && player.topUsed[cIndex];
-            return <button aria-label={`${player.name} card ${cIndex + 1}`} disabled={!held || pIndex !== game.turn || pIndex !== localPlayer} onClick={() => swap(pIndex, cIndex)} className={`card ${visible ? suitColor(card.suit) : "back"} ${sideways ? "sideways" : ""}`} key={cIndex}>{visible ? <CardFace card={card}/> : <span className="back-mark">✦</span>}</button>;
-          })}</div>
-          {revealed && <p className="round-score">Round: {player.cards.reduce((total, c) => total + cardValue(c), 0)}</p>}
-        </article>)}
-      </div>
-      <div className="piles">
-        <button className="pile draw" onClick={() => draw("draw")} disabled={!!held || revealed || game.turn !== localPlayer}><span className="stack one"/><span className="stack two"/><span className="card back">✦</span><b>DRAW</b><small>{game.draw.length} cards</small></button>
-        <div className="held"><span>IN HAND</span>{held ? <div className={`card ${suitColor(held.suit)}`}><CardFace card={held}/></div> : <div className="empty">—</div>} {held && <button className="discard-button" onClick={discardHeld}>Discard card</button>}</div>
-        <button className="pile" onClick={() => draw("discard")} disabled={!!held || revealed || game.turn !== localPlayer}><span className={`card ${suitColor(game.discard.at(-1)!.suit)}`}><CardFace card={game.discard.at(-1)!}/></span><b>DISCARD</b><small>pick up top card</small></button>
-      </div>
-    </section>
-    <section className="how"><div><p className="eyebrow">How to play</p><h2>Small cards. Big moves.</h2></div><div className="rules"><p><b>01</b> Your bottom two cards are always visible to you.</p><p><b>02</b> Draw or take discard, then swap—or discard.</p><p><b>03</b> Top cards can be swapped once, then turn sideways.</p><p><b>04</b> When the draw pile empties, lowest total wins.</p></div></section>
-    <footer><span>PLAY WITH 2–4 FRIENDS</span><div><button className={count === 2 ? "selected" : ""} onClick={() => { setCount(2); start(2); }}>2</button><button className={count === 3 ? "selected" : ""} onClick={() => { setCount(3); start(3); }}>3</button><button className={count === 4 ? "selected" : ""} onClick={() => { setCount(4); start(4); }}>4</button></div></footer>
-  </main>;
+  if (state.game === "phase10") {
+    const player = state.players[localPlayer];
+    const active = state.players[state.currentPlayer];
+    return <main><nav><div className="brand"><span>⌁</span> PHASE 10</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav><section className="hero"><p className="eyebrow">The classic ten-phase card game</p><h1>Make your<br/><i>phase count.</i></h1><p className="sub">Complete Phase {player.phase}: {PHASES[player.phase - 1]}.</p></section><section className="table phase-table"><div className="table-top"><div><span className="live-dot"/> LIVE PHASE 10 <small>• {state.players.length} PLAYERS</small></div>{localPlayer === 0 && <button className="outline" onClick={state.status === "round-over" ? () => updatePhase({ type: "next-round" }) : start}>{state.status === "round-over" ? "Next round" : "New round"}</button>}</div><div className="turn-banner"><span>✦</span><b>{state.status !== "playing" ? "ROUND COMPLETE" : `${(active.name || "Player").toUpperCase()}’S TURN`}</b><em>{notice}</em></div><div className="phase-progress">{PHASES.map((phase, i) => <span className={i + 1 === player.phase ? "current" : i + 1 < player.phase ? "done" : ""} key={phase}>{i + 1}</span>)}</div><div className="players">{state.players.map((item, pIndex) => <article className={`player ${pIndex === state.currentPlayer && state.status === "playing" ? "active" : ""}`} key={item.id}><header><div className="avatar">{item.avatar || "?"}</div><div><b>{item.name || "Player"}</b><small>Phase {item.phase} · {item.hand.length} cards</small></div><strong>{item.score} <small>PTS</small></strong></header>{item.laidPhase && <div className="melds">{item.laidPhase.map((meld) => <button className="meld" key={meld.id} onClick={() => hitPhase(item.id, meld.id)}>{meld.cards.map((card) => <span className={`phase-card mini ${phaseColor(card)}`} key={card.id}>{cardLabel(card)}</span>)}</button>)}</div>}{pIndex === localPlayer ? <div className="phase-hand">{item.hand.map((card) => <button className={`phase-card ${phaseColor(card)} ${selectedPhase.includes(card.id) ? "selected" : ""}`} key={card.id} onClick={() => setSelectedPhase((selected) => selected.includes(card.id) ? selected.filter((id) => id !== card.id) : [...selected, card.id])}><PhaseCardFace card={card}/></button>)}</div> : <div className="hidden-hand">{Array.from({ length: item.hand.length }, (_, i) => <span className="phase-card back" key={i}>✦</span>)}</div>}{pIndex !== localPlayer && state.currentPlayer === localPlayer && state.turnHasDrawn && item.id !== player.id && <button className="skip-button" onClick={() => updatePhase({ type: "use-skip", targetId: item.id })}>Skip {item.name || "player"}</button>}</article>)}</div><div className="phase-actions"><button className="pile draw" onClick={() => updatePhase({ type: "draw", from: "draw" })} disabled={state.currentPlayer !== localPlayer || state.turnHasDrawn}><span className="card back">✦</span><b>DRAW</b><small>{state.drawPile.length} cards</small></button><button className="pile" onClick={() => updatePhase({ type: "draw", from: "discard" })} disabled={state.currentPlayer !== localPlayer || state.turnHasDrawn}><span className={`phase-card ${state.discardPile.at(-1) ? phaseColor(state.discardPile.at(-1)!) : "back"}`}>{state.discardPile.at(-1) ? <PhaseCardFace card={state.discardPile.at(-1)!}/> : "—"}</span><b>DISCARD</b><small>pick up top card</small></button><button className="primary compact" disabled={!selectedPhase.length || state.currentPlayer !== localPlayer || !state.turnHasDrawn} onClick={() => updatePhase({ type: "discard", cardId: selectedPhase[0] })}>Discard selected</button><button className="primary compact" disabled={!selectedPhase.length || state.currentPlayer !== localPlayer || !state.turnHasDrawn} onClick={() => { const cards = player.hand.filter((card) => selectedPhase.includes(card.id)); const sizes = player.phase === 1 ? [3, 3] : player.phase === 2 || player.phase === 3 ? [3, 4] : player.phase === 7 ? [4, 4] : player.phase === 9 ? [5, 2] : player.phase === 10 ? [5, 3] : [player.phase === 4 ? 7 : player.phase === 5 ? 8 : player.phase === 6 ? 9 : 7]; const melds: PhaseCard[][] = []; let cursor = 0; for (const size of sizes) { melds.push(cards.slice(cursor, cursor + size)); cursor += size; } updatePhase({ type: "lay-phase", melds }); }}>Lay Phase</button></div><section className="how"><div><p className="eyebrow">How to play</p><h2>Ten phases.<br/>One winner.</h2></div><div className="rules">{PHASES.slice(0, 4).map((phase, i) => <p key={phase}><b>{String(i + 1).padStart(2, "0")}</b>{phase}</p>)}<p><b>05–10</b>Runs, colors, and sets get harder each round.</p></div></section></section></main>;
+  }
+
+  return <main><nav><div className="brand"><span>⌁</span> GOLF NIGHT</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav><section className="hero"><p className="eyebrow">A four-card game for friends</p><h1>Keep your score<br/><i>under par.</i></h1><p className="sub">Draw smart. Swap wisely. The lowest total wins.</p></section><section className="table"><div className="table-top"><div><span className="live-dot"/> LIVE GOLF <small>• {state.players.length} PLAYERS</small></div>{localPlayer === 0 && <button className="outline" onClick={start}>New round</button>}</div><div className="turn-banner"><span>✦</span><b>{state.revealed ? "ROUND COMPLETE" : `${state.players[state.turn].name.toUpperCase()}’S TURN`}</b><em>{notice}</em></div><div className="players">{state.players.map((player, pIndex) => <article className={`player ${pIndex === state.turn && !state.revealed ? "active" : ""}`} key={player.id}><header><div className="avatar">{player.avatar}</div><div><b>{player.name}</b><small>{pIndex === state.turn && !state.revealed ? "playing now" : "at the table"}</small></div><strong>{player.score} <small>PTS</small></strong></header><div className="cards">{player.cards.map((card, cIndex) => { const visible = !!state.revealed || (pIndex === localPlayer && cIndex >= 2) || (pIndex === localPlayer && cIndex < 2 && player.topUsed[cIndex]); return <button className={`card ${visible ? golfColor(card.suit) : "back"}`} disabled={!heldGolf || pIndex !== localPlayer || state.turn !== localPlayer} onClick={() => actGolf(cIndex)} key={card.id}>{visible ? <GolfCardFace card={card}/> : "✦"}</button>; })}</div></article>)}</div><div className="piles"><button className="pile draw" onClick={() => drawGolf("draw")} disabled={!!heldGolf || state.turn !== localPlayer}><span className="card back">✦</span><b>DRAW</b><small>{state.draw.length} cards</small></button><div className="held"><span>IN HAND</span>{heldGolf ? <div className={`card ${golfColor(heldGolf.suit)}`}><GolfCardFace card={heldGolf}/></div> : <div className="empty">—</div>}{heldGolf && <button className="discard-button" onClick={() => actGolf()}>Discard card</button>}</div><button className="pile" onClick={() => drawGolf("discard")} disabled={!!heldGolf || state.turn !== localPlayer}><span className={`card ${state.discard.at(-1) ? golfColor(state.discard.at(-1)!.suit) : "back"}`}>{state.discard.at(-1) ? <GolfCardFace card={state.discard.at(-1)!} /> : "—"}</span><b>DISCARD</b><small>pick up top card</small></button></div></section><section className="how"><div><p className="eyebrow">How to play</p><h2>Small cards.<br/>Big moves.</h2></div><div className="rules"><p><b>01</b> Your bottom two cards are visible to you.</p><p><b>02</b> Draw or take discard, then swap or discard.</p><p><b>03</b> Top cards can be swapped once.</p><p><b>04</b> Lowest total wins.</p></div></section></main>;
 }

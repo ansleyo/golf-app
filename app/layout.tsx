@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./styles.css";
 
 export const metadata: Metadata = {
-  title: "Golf Night",
-  description: "A four-card game of Golf for friends."
+  title: "Card Night",
+  description: "Golf and Phase 10 card games for friends."
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

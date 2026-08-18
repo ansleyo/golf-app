@@ -3,7 +3,7 @@
 -- app public, replace the open policies with authenticated/player-specific ones.
 
 create table if not exists public.golf_rooms (
-  code text primary key check (code ~ '^GOLF-[A-Z0-9]{4}$'),
+  code text primary key check (code ~ '^(GOLF|PHASE)-[A-Z0-9]{4}$'),
   state jsonb not null,
   updated_at timestamptz not null default now(),
   created_at timestamptz not null default now()
