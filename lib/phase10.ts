@@ -41,6 +41,7 @@ export type GameState = {
   skipTarget: PlayerId | null;
   round: number;
   winnerId?: PlayerId;
+  drawnFromDiscardId?: string;
 };
 export type Result<T> = { ok: true; state?: T; value?: T } | { ok: false; error: string };
 export type Validation = { valid: true } | { valid: false; error: string };
@@ -178,7 +179,7 @@ function turn(state: GameState) { return state.players[state.currentPlayer]; }
 function endTurn(state: GameState): GameState {
   let next = (state.currentPlayer + 1) % state.players.length;
   if (state.skipTarget) { const i = state.players.findIndex((p) => p.id === state.skipTarget); if (i >= 0) next = (i + 1) % state.players.length; }
-  return { ...state, currentPlayer: next, turnHasDrawn: false, skipTarget: null, players: state.players.map((p) => ({ ...p, skipped: false })) };
+  return { ...state, currentPlayer: next, turnHasDrawn: false, skipTarget: null, drawnFromDiscardId: undefined, players: state.players.map((p) => ({ ...p, skipped: false })) };
 }
 export function drawCard(state: GameState, from: "draw" | "discard" = "draw"): Result<GameState> {
   if (state.status !== "playing") return fail("The round is not active.");
@@ -191,17 +192,19 @@ export function drawCard(state: GameState, from: "draw" | "discard" = "draw"): R
   }
   if (from === "discard") {
     if (!discardPile.length) return fail("The discard pile is empty.");
-    const card = discardPile.pop()!; return ok({ ...replacePlayer({ ...state, drawPile, discardPile }, state.currentPlayer, { ...turn(state), hand: [...turn(state).hand, card] }), turnHasDrawn: true });
+    const card = discardPile.pop()!;
+    return ok({ ...replacePlayer({ ...state, drawPile, discardPile }, state.currentPlayer, { ...turn(state), hand: [...turn(state).hand, card] }), turnHasDrawn: true, drawnFromDiscardId: card.id });
   }
   const card = drawPile.pop()!; return ok({ ...replacePlayer({ ...state, drawPile, discardPile }, state.currentPlayer, { ...turn(state), hand: [...turn(state).hand, card] }), turnHasDrawn: true });
 }
 export function discardCard(state: GameState, cardId: string): Result<GameState> {
   const p = turn(state); if (state.status !== "playing" || state.skipTarget || p.hand.length === 0) return fail("Cannot discard now.");
   if (!state.turnHasDrawn) return fail("Draw a card before discarding.");
+  if (state.drawnFromDiscardId === cardId) return fail("You cannot immediately re-discard the card picked up from the discard pile.");
   if (state.drawPile.length + state.discardPile.length === 0) return fail("No card can be discarded.");
   const i = p.hand.findIndex((c) => c.id === cardId); if (i < 0) return fail("Card is not in the current player's hand.");
   const hand = [...p.hand]; const [card] = hand.splice(i, 1);
-  const next = endTurn({ ...replacePlayer(state, state.currentPlayer, { ...p, hand }), discardPile: [...state.discardPile, card] });
+  const next = endTurn({ ...replacePlayer(state, state.currentPlayer, { ...p, hand }), discardPile: [...state.discardPile, card], drawnFromDiscardId: undefined });
   return ok(hand.length === 0 ? { ...next, status: "round-over", winnerId: p.id } : next);
 }
 export function layPhase(state: GameState, melds: Meld[]): Result<GameState> {
@@ -251,7 +254,7 @@ export function useSkip(state: GameState, targetId: PlayerId): Result<GameState>
   const skip = p.hand.find((c) => c.kind === "skip")!;
   const targetIndex = state.players.findIndex((x) => x.id === targetId);
   const next = (targetIndex + 1) % state.players.length;
-  return ok({ ...replacePlayer(state, state.currentPlayer, { ...p, hand }), discardPile: [...state.discardPile, skip], currentPlayer: next, turnHasDrawn: false, skipTarget: null });
+  return ok({ ...replacePlayer(state, state.currentPlayer, { ...p, hand }), discardPile: [...state.discardPile, skip], currentPlayer: next, turnHasDrawn: false, skipTarget: null, drawnFromDiscardId: undefined });
 }
 export function nextRound(state: GameState): Result<GameState> {
   if (state.status !== "round-over") return fail("The round is not over.");
