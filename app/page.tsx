@@ -1,8 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { supabase } from "../lib/supabase";
-import type { RealtimeChannel } from "@supabase/supabase-js";
 import {
   COLORS, PHASES, type Card as PhaseCard, type GameState as PhaseState,
   deal as dealPhaseGame, findPhaseMelds, phaseMeldSizes, reduceGame,
@@ -30,6 +28,19 @@ function shuffle<T>(values: T[]) {
     [next[i], next[j]] = [next[j], next[i]];
   }
   return next;
+}
+
+const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "");
+
+async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  if (!apiBaseUrl) throw new Error("NEXT_PUBLIC_API_URL is not configured.");
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    ...init,
+    headers: { "content-type": "application/json", ...(init?.headers || {}) },
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : `API request failed (${response.status}).`);
+  return body as T;
 }
 
 function makeGolf(count: number, name = "You", avatar = "⛳"): GolfState {
@@ -82,7 +93,6 @@ export default function Home() {
   const [phaseError, setPhaseError] = useState("");
   const [error, setError] = useState("");
   const remoteChange = useRef(false);
-  const channel = useRef<RealtimeChannel | null>(null);
   const roomCode = activeRoom || `${gameType === "golf" ? "GOLF" : "PHASE"}-DEMO`;
   const roomPrefix = gameType === "golf" ? "GOLF" : "PHASE";
 
@@ -93,20 +103,26 @@ export default function Home() {
 
   useEffect(() => {
     if (!activeRoom) return;
-    const apply = (incoming: RoomState) => { remoteChange.current = true; setState(incoming); };
-    const roomChannel = supabase.channel(`card-room-${activeRoom}`).on("broadcast", { event: "game-state" }, ({ payload }) => apply(payload.state as RoomState)).on(
-      "postgres_changes", { event: "UPDATE", schema: "public", table: "golf_rooms", filter: `code=eq.${activeRoom}` },
-      ({ new: updated }) => apply(updated.state as RoomState),
-    ).subscribe();
-    channel.current = roomChannel;
-    return () => { channel.current = null; supabase.removeChannel(roomChannel); };
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const incoming = await apiFetch<{ state: RoomState }>(`/rooms/${activeRoom}`);
+        if (!cancelled) { remoteChange.current = true; setState(incoming.state); }
+      } catch (caught) {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : "Could not refresh the room.");
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 2000);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [activeRoom]);
 
   useEffect(() => {
     if (!activeRoom) return;
     if (remoteChange.current) { remoteChange.current = false; return; }
-    void supabase.from("golf_rooms").update({ state, updated_at: new Date().toISOString() }).eq("code", activeRoom);
-    void channel.current?.send({ type: "broadcast", event: "game-state", payload: { state } });
+    void apiFetch(`/rooms/${activeRoom}`, { method: "PUT", body: JSON.stringify({ state }) }).catch((caught) => {
+      setError(caught instanceof Error ? caught.message : "Could not save the room.");
+    });
   }, [state, activeRoom]);
 
   const resetLocalTurn = () => { setHeldGolf(null); setHeldGolfFromDiscard(false); setSelectedPhase([]); };
@@ -128,27 +144,33 @@ export default function Home() {
     if (!join) {
       const code = `${gameType === "golf" ? "GOLF" : "PHASE"}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const newState = gameType === "golf" ? makeGolf(count, name.trim(), avatar) : makePhase(count, name.trim(), avatar);
-      const { error: insertError } = await supabase.from("golf_rooms").insert({ code, state: newState });
-      if (insertError) { setError("Could not create a table. Check the Supabase setup."); return; }
-      setState(newState); setLocalPlayer(0); setActiveRoom(code); setScreen("room"); return;
+      try {
+        await apiFetch(`/rooms/${code}`, { method: "POST", body: JSON.stringify({ code, state: newState }) });
+        setState(newState); setLocalPlayer(0); setActiveRoom(code); setScreen("room");
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : "Could not create a table.");
+      }
+      return;
     }
     const suffix = roomInput.trim().toUpperCase().replace(`${roomPrefix}-`, "").replace(/[^A-Z0-9]/g, "").slice(0, 4);
     if (suffix.length !== 4) { setError("Enter the four-character room code."); return; }
     const code = `${roomPrefix}-${suffix}`;
-    const { data, error: readError } = await supabase.from("golf_rooms").select("state").eq("code", code).single();
-    if (readError || !data) { setError("That room code was not found."); return; }
-    const roomState = data.state as RoomState;
-    if (roomState.game !== gameType) { setError("That room is for a different game."); return; }
-    if (roomState.started) { setError("That game has already started."); return; }
-    if (roomState.players.length >= roomState.maxPlayers) { setError("That table is already full."); return; }
-    const id = `p${roomState.players.length}`;
-    const player = gameType === "golf"
-      ? { id, name: name.trim(), avatar, cards: [], topUsed: [false, false], score: 0 }
-      : { id, name: name.trim(), avatar, hand: [], phase: 1 as const, phaseComplete: false, score: 0, laidPhase: null, hits: 0, skipped: false };
-    const joined = { ...roomState, players: [...roomState.players, player] } as RoomState;
-    const { error: updateError } = await supabase.from("golf_rooms").update({ state: joined, updated_at: new Date().toISOString() }).eq("code", code);
-    if (updateError) { setError("Could not join that table."); return; }
-    setState(joined); setCount(roomState.maxPlayers); setLocalPlayer(roomState.players.length); setActiveRoom(code); setScreen("room");
+    try {
+      const data = await apiFetch<{ state: RoomState }>(`/rooms/${code}`);
+      const roomState = data.state;
+      if (roomState.game !== gameType) { setError("That room is for a different game."); return; }
+      if (roomState.started) { setError("That game has already started."); return; }
+      if (roomState.players.length >= roomState.maxPlayers) { setError("That table is already full."); return; }
+      const id = `p${roomState.players.length}`;
+      const player = gameType === "golf"
+        ? { id, name: name.trim(), avatar, cards: [], topUsed: [false, false], score: 0 }
+        : { id, name: name.trim(), avatar, hand: [], phase: 1 as const, phaseComplete: false, score: 0, laidPhase: null, hits: 0, skipped: false };
+      const joined = { ...roomState, players: [...roomState.players, player] } as RoomState;
+      await apiFetch(`/rooms/${code}`, { method: "PUT", body: JSON.stringify({ state: joined }) });
+      setState(joined); setCount(roomState.maxPlayers); setLocalPlayer(roomState.players.length); setActiveRoom(code); setScreen("room");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not join that table.");
+    }
   };
 
   const start = () => {

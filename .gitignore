@@ -3,3 +3,6 @@ node_modules/
 *.log
 .DS_Store
 .env*.local
+
+api/node_modules/
+api/dist/

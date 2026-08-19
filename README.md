@@ -27,6 +27,18 @@ Open `http://localhost:3000`.
 
 Push this directory to GitHub and import the repository in Vercel. Its default Next.js settings work without changes.
 
-## Multiplayer note
+## Azure deployment
 
-The app stores each room's game discriminator and authoritative state in Supabase, then broadcasts updates through Supabase Realtime. Room codes use `GOLF-XXXX` or `PHASE-XXXX`; the game prefix is fixed in the join form. The existing open policies are intended for friends-only play and should be tightened before making the app public.
+The Next.js client uses `NEXT_PUBLIC_API_URL` to call the Azure Functions room API. The API stores authoritative room state in Azure Database for PostgreSQL and exposes `GET`, `POST`, and `PUT` routes under `/api/rooms/{code}`. The client polls the room API every two seconds so it does not require database credentials or direct database access in the browser.
+
+Configure these API settings in the Azure Function App:
+
+```text
+POSTGRES_HOST
+POSTGRES_PORT
+POSTGRES_DATABASE
+POSTGRES_USER
+POSTGRES_PASSWORD
+```
+
+Configure `NEXT_PUBLIC_API_URL` in the frontend deployment, for example `https://<function-app>.azurewebsites.net/api`. Room codes use `GOLF-XXXX` or `PHASE-XXXX`; the game prefix is fixed in the join form.
