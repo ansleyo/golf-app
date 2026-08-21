@@ -268,15 +268,16 @@ export function hit(state: GameState, targetPlayerId: PlayerId, meldId: string, 
   const i = p.hand.findIndex((c) => c.id === cardId); if (i < 0) return fail("Card is not in hand.");
   const valid = validateHit(p.hand[i], meld.cards, meld.kind); if (!valid.valid) return fail(valid.error);
   const hand = [...p.hand]; const [card] = hand.splice(i, 1);
+  const addToMeld = (player: PlayerState): PlayerState => ({
+    ...player,
+    laidPhase: player.laidPhase!.map((m) => m.id === meldId
+      ? { ...m, cards: orderMeld([...m.cards, card], m.kind ?? "run") }
+      : m),
+  });
   const players = state.players.map((x) => x.id === p.id
-    ? { ...x, hand, hits: x.hits + 1 }
+    ? addToMeld({ ...x, hand, hits: x.hits + 1 })
     : x.id === target.id
-      ? {
-        ...x,
-        laidPhase: x.laidPhase!.map((m) => m.id === meldId
-          ? { ...m, cards: orderMeld([...m.cards, card], m.kind ?? "run") }
-          : m),
-      }
+      ? addToMeld(x)
       : x);
   return ok({ ...state, players });
 }
