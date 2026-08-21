@@ -45,6 +45,7 @@ export type GameState = {
 };
 export type Result<T> = { ok: true; state?: T; value?: T } | { ok: false; error: string };
 export type Validation = { valid: true } | { valid: false; error: string };
+export type PhaseSelection = { melds: Meld[]; selected: Card[] };
 
 const ok = <T>(state?: T): Result<T> => ({ ok: true, ...(state === undefined ? {} : { state, value: state }) });
 const fail = (error: string): Result<never> => ({ ok: false, error });
@@ -184,6 +185,32 @@ export function findPhaseMelds(phase: PhaseNumber, cards: Meld): Meld[] | null {
   };
   return search(cards, 0);
 }
+export function findPhaseSelection(phase: PhaseNumber, cards: Meld): PhaseSelection | null {
+  const required = phaseMeldSizes(phase).reduce((sum, size) => sum + size, 0);
+  if (cards.length < required) return null;
+  const kinds = phaseMeldKinds(phase);
+  for (const baseCards of combinations(cards, required)) {
+    const melds = findPhaseMelds(phase, baseCards);
+    if (!melds) continue;
+    const extras = cards.filter((card) => !baseCards.some((base) => base.id === card.id));
+    const addExtras = (remaining: Card[], current: Meld[]): Meld[] | null => {
+      if (!remaining.length) return current;
+      const [card, ...rest] = remaining;
+      for (let index = 0; index < current.length; index++) {
+        const valid = validateHit(card, current[index], kinds[index]);
+        if (!valid.valid) continue;
+        const next = [...current];
+        next[index] = orderMeld([...next[index], card], kinds[index]);
+        const result = addExtras(rest, next);
+        if (result) return result;
+      }
+      return null;
+    };
+    const expanded = addExtras(extras, melds.map((meld) => [...meld]));
+    if (expanded) return { melds: expanded, selected: cards };
+  }
+  return null;
+}
 
 export function cardScore(card: Card): number { return card.kind === "wild" ? 25 : card.kind === "skip" ? 15 : card.value! <= 9 ? 5 : 10; }
 export const scoreCards = (cards: readonly Card[]) => cards.reduce((sum, c) => sum + cardScore(c), 0);
@@ -208,9 +235,10 @@ export function drawCard(state: GameState, from: "draw" | "discard" = "draw"): R
   if (from === "discard") {
     if (!discardPile.length) return fail("The discard pile is empty.");
     const card = discardPile.pop()!;
+    if (card.kind === "skip") return fail("Skip cards cannot be picked up from the discard pile.");
     return ok({ ...replacePlayer({ ...state, drawPile, discardPile }, state.currentPlayer, { ...turn(state), hand: [...turn(state).hand, card] }), turnHasDrawn: true, drawnFromDiscardId: card.id });
   }
-  const card = drawPile.pop()!; return ok({ ...replacePlayer({ ...state, drawPile, discardPile }, state.currentPlayer, { ...turn(state), hand: [...turn(state).hand, card] }), turnHasDrawn: true });
+  const card = drawPile.pop()!; return ok({ ...replacePlayer({ ...state, drawPile, discardPile }, state.currentPlayer, { ...turn(state), hand: [...turn(state).hand, card] }), turnHasDrawn: true, drawnFromDiscardId: undefined });
 }
 export function discardCard(state: GameState, cardId: string): Result<GameState> {
   const p = turn(state); if (state.status !== "playing" || state.skipTarget || p.hand.length === 0) return fail("Cannot discard now.");
@@ -222,6 +250,10 @@ export function discardCard(state: GameState, cardId: string): Result<GameState>
   const next = endTurn({ ...replacePlayer(state, state.currentPlayer, { ...p, hand }), discardPile: [...state.discardPile, card], drawnFromDiscardId: undefined });
   return ok(hand.length === 0 ? { ...next, status: "round-over", winnerId: p.id } : next);
 }
+function finishIfEmpty(state: GameState, playerId: PlayerId): GameState {
+  const player = state.players.find((item) => item.id === playerId);
+  return player?.hand.length === 0 ? { ...state, status: "round-over", winnerId: playerId } : state;
+}
 export function layPhase(state: GameState, melds: Meld[]): Result<GameState> {
   const p = turn(state); if (state.status !== "playing" || state.skipTarget || p.laidPhase) return fail("Phase has already been laid or turn is unavailable.");
   if (!state.turnHasDrawn) return fail("Draw a card before laying your phase.");
@@ -232,7 +264,7 @@ export function layPhase(state: GameState, melds: Meld[]): Result<GameState> {
     p.phase === 1 || p.phase === 7 || p.phase === 9 ? ["set", "set"] :
     p.phase === 2 ? ["set", "run"] : p.phase === 3 ? ["set", "run"] :
     p.phase === 10 ? ["set", "run"] : ["run"];
-  return ok(replacePlayer(state, state.currentPlayer, {
+  const next = replacePlayer(state, state.currentPlayer, {
     ...p,
     hand,
     phaseComplete: true,
@@ -241,7 +273,24 @@ export function layPhase(state: GameState, melds: Meld[]): Result<GameState> {
       kind: kinds[i],
       cards: orderMeld(cards, kinds[i]),
     })),
-  }));
+  });
+  return ok(finishIfEmpty(next, p.id));
+}
+export function layPhaseSelection(state: GameState, selectedCards: Meld): Result<GameState> {
+  const p = turn(state);
+  if (state.status !== "playing" || state.skipTarget || p.laidPhase) return fail("Phase has already been laid or turn is unavailable.");
+  if (!state.turnHasDrawn) return fail("Draw a card before laying your phase.");
+  const selection = findPhaseSelection(p.phase, selectedCards);
+  if (!selection) return fail("Your selected cards do not contain a valid phase and compatible extras.");
+  const hand = p.hand.filter((card) => !selection.selected.some((selected) => selected.id === card.id));
+  const kinds = phaseMeldKinds(p.phase);
+  const next = replacePlayer(state, state.currentPlayer, {
+    ...p,
+    hand,
+    phaseComplete: true,
+    laidPhase: selection.melds.map((cards, i) => ({ id: `${p.id}-phase-${i}`, kind: kinds[i], cards })),
+  });
+  return ok(finishIfEmpty(next, p.id));
 }
 export function validateHit(card: Card, meld: Meld, kind?: "set" | "run" | "color"): Validation {
   if (card.kind === "skip" || meld.some((c) => c.kind === "skip")) return { valid: false, error: "Skip cards cannot be hit." };
@@ -279,7 +328,8 @@ export function hit(state: GameState, targetPlayerId: PlayerId, meldId: string, 
     : x.id === target.id
       ? addToMeld(x)
       : x);
-  return ok({ ...state, players });
+  const next = { ...state, players };
+  return ok(finishIfEmpty(next, p.id));
 }
 export function useSkip(state: GameState, targetId: PlayerId): Result<GameState> {
   const p = turn(state); if (state.status !== "playing" || state.skipTarget || !state.turnHasDrawn || !p.hand.some((c) => c.kind === "skip")) return fail("Cannot use Skip now.");
@@ -304,7 +354,7 @@ export function nextRound(state: GameState): Result<GameState> {
   }
   const dealt = createGame(players.map((p) => p.id));
   if (!dealt.ok) return dealt;
-  return ok({ ...dealt.state!, players: dealt.state!.players.map((p, i) => ({ ...p, name: players[i].name, phase: players[i].phase, score: players[i].score })), round: state.round + 1 });
+  return ok({ ...dealt.state!, players: dealt.state!.players.map((p, i) => ({ ...p, name: players[i].name, avatar: players[i].avatar, phase: players[i].phase, score: players[i].score })), round: state.round + 1 });
 }
 export function finishRound(state: GameState): Result<GameState> {
   const winner = state.players.find((p) => p.hand.length === 0);
@@ -318,6 +368,7 @@ export type GameAction =
   | { type: "draw"; from?: "draw" | "discard" }
   | { type: "discard"; cardId: string }
   | { type: "lay-phase"; melds: Meld[] }
+  | { type: "lay-phase-selection"; cards: Meld }
   | { type: "hit"; targetPlayerId: PlayerId; meldId: string; cardId: string }
   | { type: "use-skip"; targetId: PlayerId }
   | { type: "finish-round" }
@@ -327,6 +378,7 @@ export function reduceGame(state: GameState, action: GameAction): Result<GameSta
     case "draw": return drawCard(state, action.from);
     case "discard": return discardCard(state, action.cardId);
     case "lay-phase": return layPhase(state, action.melds);
+    case "lay-phase-selection": return layPhaseSelection(state, action.cards);
     case "hit": return hit(state, action.targetPlayerId, action.meldId, action.cardId);
     case "use-skip": return useSkip(state, action.targetId);
     case "finish-round": return finishRound(state);

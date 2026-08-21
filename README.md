@@ -9,8 +9,9 @@ A Vercel-ready Next.js interface for two card games:
 - Each top card can be swapped once; it rotates sideways after that move
 - The round ends after the last draw card is placed or discarded; cards reveal and scores are shown
 - **Phase 10:** 2–4 players, a standard 108-card deck, colored cards, Wild cards, and Skip cards
+- Phase 10 deck composition: 8 copies of each number (1–12), 8 Wild cards, and 4 Skip cards
 - Complete the ten standard phases in order: two sets of 3; set of 3 plus run of 4; set of 4 plus run of 4; runs of 7, 8, and 9; two sets of 4; seven cards of one color; set of 5 plus set of 2; set of 5 plus run of 3
-- Draw, discard, lay down a phase, hit existing melds, use Skip cards, and score cards remaining in hand
+- Draw, discard, lay down a phase with compatible extra cards, hit existing melds, use Skip cards, and score cards remaining in hand
 
 ## Run locally
 
