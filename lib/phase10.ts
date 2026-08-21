@@ -83,15 +83,30 @@ function validateSet(cards: Meld, count: number): Validation {
   if (!values.length || new Set(values).size !== 1) return { valid: false, error: "A set needs matching natural numbers and may contain Wilds." };
   return { valid: true };
 }
-function validateRun(cards: Meld, count: number): Validation {
-  if (cards.length !== count) return { valid: false, error: `Run must contain ${count} cards.` };
+function runStart(cards: Meld): number | null {
   const values = cards.filter(isNumber).map((c) => c.value).sort((a, b) => a - b);
-  if (!values.length) return { valid: false, error: "A run needs at least one natural card." };
+  if (!values.length || new Set(values).size !== values.length) return null;
   for (let start = Math.max(1, values[0] - cards.length + 1); start <= values[0]; start++) {
     const expected = new Set(Array.from({ length: cards.length }, (_, i) => start + i));
-    if (values.every((v) => expected.has(v)) && new Set(values).size === values.length) return { valid: true };
+    if (values.every((value) => expected.has(value))) return start;
   }
-  return { valid: false, error: "Run cards must be consecutive (Wilds fill gaps)."};
+  return null;
+}
+function validateRun(cards: Meld, count: number): Validation {
+  if (cards.length !== count) return { valid: false, error: `Run must contain ${count} cards.` };
+  return runStart(cards) === null
+    ? { valid: false, error: "Run cards must be consecutive (Wilds fill gaps)." }
+    : { valid: true };
+}
+function orderRun(cards: Meld): Meld {
+  const start = runStart(cards);
+  if (start === null) return cards;
+  const natural = new Map(cards.filter(isNumber).map((card) => [card.value, card]));
+  const wilds = cards.filter((card) => card.kind === "wild");
+  return Array.from({ length: cards.length }, (_, index) => natural.get(start + index) || wilds.shift()!);
+}
+function orderMeld(cards: Meld, kind: "set" | "run" | "color"): Meld {
+  return kind === "run" ? orderRun(cards) : [...cards];
 }
 export function validateMeld(cards: Meld, kind: "set" | "run" | "color", count?: number): Validation {
   if (!cards.length || cards.some((c) => c.kind === "skip")) return { valid: false, error: "Melds cannot contain Skip cards." };
@@ -217,7 +232,16 @@ export function layPhase(state: GameState, melds: Meld[]): Result<GameState> {
     p.phase === 1 || p.phase === 7 || p.phase === 9 ? ["set", "set"] :
     p.phase === 2 ? ["set", "run"] : p.phase === 3 ? ["set", "run"] :
     p.phase === 10 ? ["set", "run"] : ["run"];
-  return ok(replacePlayer(state, state.currentPlayer, { ...p, hand, phaseComplete: true, laidPhase: melds.map((cards, i) => ({ id: `${p.id}-phase-${i}`, kind: kinds[i], cards: [...cards] })) }));
+  return ok(replacePlayer(state, state.currentPlayer, {
+    ...p,
+    hand,
+    phaseComplete: true,
+    laidPhase: melds.map((cards, i) => ({
+      id: `${p.id}-phase-${i}`,
+      kind: kinds[i],
+      cards: orderMeld(cards, kinds[i]),
+    })),
+  }));
 }
 export function validateHit(card: Card, meld: Meld, kind?: "set" | "run" | "color"): Validation {
   if (card.kind === "skip" || meld.some((c) => c.kind === "skip")) return { valid: false, error: "Skip cards cannot be hit." };
@@ -244,7 +268,16 @@ export function hit(state: GameState, targetPlayerId: PlayerId, meldId: string, 
   const i = p.hand.findIndex((c) => c.id === cardId); if (i < 0) return fail("Card is not in hand.");
   const valid = validateHit(p.hand[i], meld.cards, meld.kind); if (!valid.valid) return fail(valid.error);
   const hand = [...p.hand]; const [card] = hand.splice(i, 1);
-  const players = state.players.map((x) => x.id === p.id ? { ...x, hand, hits: x.hits + 1 } : x.id === target.id ? { ...x, laidPhase: x.laidPhase!.map((m) => m.id === meldId ? { ...m, cards: [...m.cards, card] } : m) } : x);
+  const players = state.players.map((x) => x.id === p.id
+    ? { ...x, hand, hits: x.hits + 1 }
+    : x.id === target.id
+      ? {
+        ...x,
+        laidPhase: x.laidPhase!.map((m) => m.id === meldId
+          ? { ...m, cards: orderMeld([...m.cards, card], m.kind ?? "run") }
+          : m),
+      }
+      : x);
   return ok({ ...state, players });
 }
 export function useSkip(state: GameState, targetId: PlayerId): Result<GameState> {

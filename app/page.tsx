@@ -89,6 +89,9 @@ export default function Home() {
   const [heldGolf, setHeldGolf] = useState<GolfCard | null>(null);
   const [heldGolfFromDiscard, setHeldGolfFromDiscard] = useState(false);
   const [selectedPhase, setSelectedPhase] = useState<string[]>([]);
+  const [draggedPhaseCard, setDraggedPhaseCard] = useState<string | null>(null);
+  const draggedPhaseCardRef = useRef<string | null>(null);
+  const suppressPhaseClickRef = useRef(false);
   const [notice, setNotice] = useState("Draw a card to begin.");
   const [phaseError, setPhaseError] = useState("");
   const [error, setError] = useState("");
@@ -98,7 +101,7 @@ export default function Home() {
 
   useEffect(() => {
     setState(gameType === "golf" ? makeGolf(count) : makePhase(count));
-    setHeldGolf(null); setHeldGolfFromDiscard(false); setSelectedPhase([]);
+    setHeldGolf(null); setHeldGolfFromDiscard(false); setSelectedPhase([]); setDraggedPhaseCard(null);
   }, [gameType, count]);
 
   useEffect(() => {
@@ -125,7 +128,61 @@ export default function Home() {
     });
   }, [state, activeRoom]);
 
-  const resetLocalTurn = () => { setHeldGolf(null); setHeldGolfFromDiscard(false); setSelectedPhase([]); };
+  useEffect(() => {
+    if (state.game !== "phase10") return;
+    const player = state.players[localPlayer];
+    if (!player) return;
+    const maxSelection = player.laidPhase
+      ? 1
+      : phaseMeldSizes(player.phase).reduce((sum, size) => sum + size, 0);
+    setSelectedPhase((selected) => {
+      const available = new Set(player.hand.map((card) => card.id));
+      const valid = selected.filter((id) => available.has(id)).slice(0, maxSelection);
+      return state.currentPlayer === localPlayer && state.turnHasDrawn ? valid : [];
+    });
+  }, [state, localPlayer]);
+
+  const resetLocalTurn = () => {
+    setHeldGolf(null);
+    setHeldGolfFromDiscard(false);
+    setSelectedPhase([]);
+    setDraggedPhaseCard(null);
+    draggedPhaseCardRef.current = null;
+    suppressPhaseClickRef.current = false;
+  };
+  const togglePhaseCard = (cardId: string) => {
+    if (state.game !== "phase10" || state.currentPlayer !== localPlayer || !state.turnHasDrawn) return;
+    const player = state.players[localPlayer];
+    const maxSelection = player.laidPhase
+      ? 1
+      : phaseMeldSizes(player.phase).reduce((sum, size) => sum + size, 0);
+    setSelectedPhase((selected) => {
+      if (selected.includes(cardId)) return selected.filter((id) => id !== cardId);
+      if (selected.length >= maxSelection) {
+        setNotice(player.laidPhase ? "Select one card to place." : `Select only ${maxSelection} cards for your phase.`);
+        return selected;
+      }
+      setPhaseError("");
+      return [...selected, cardId];
+    });
+  };
+  const reorderPhaseHand = (fromId: string, toId: string) => {
+    if (state.game !== "phase10" || fromId === toId) return;
+    setState((current) => {
+      if (current.game !== "phase10") return current;
+      const player = current.players[localPlayer];
+      const fromIndex = player.hand.findIndex((card) => card.id === fromId);
+      const toIndex = player.hand.findIndex((card) => card.id === toId);
+      if (fromIndex < 0 || toIndex < 0) return current;
+      const hand = [...player.hand];
+      const [card] = hand.splice(fromIndex, 1);
+      hand.splice(toIndex, 0, card);
+      return {
+        ...current,
+        players: current.players.map((item, index) => index === localPlayer ? { ...item, hand } : item),
+      };
+    });
+  };
   const updatePhase = (action: Parameters<typeof reduceGame>[1]) => {
     if (state.game !== "phase10") return;
     const result = reduceGame(state, action);
@@ -134,7 +191,11 @@ export default function Home() {
     setState({ ...result.state!, game: "phase10", maxPlayers: state.maxPlayers, started: true }); resetLocalTurn();
   };
   const hitPhase = (targetPlayerId: string, meldId: string) => {
-    if (state.game !== "phase10" || selectedPhase.length !== 1) return;
+    if (state.game !== "phase10") return;
+    if (selectedPhase.length !== 1) {
+      setNotice("Select one card, then click the meld where you want to place it.");
+      return;
+    }
     updatePhase({ type: "hit", targetPlayerId, meldId, cardId: selectedPhase[0] });
   };
 
@@ -225,8 +286,9 @@ export default function Home() {
     const selectedCards = player.hand.filter((card) => selectedPhase.includes(card.id));
     const requiredCards = phaseMeldSizes(player.phase).reduce((sum, size) => sum + size, 0);
     const proposedMelds = findPhaseMelds(player.phase, selectedCards);
-    return <main className="phase10-page"><nav><div className="brand"><span>⌁</span> PHASE 10</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav><section className="hero"><p className="eyebrow">The classic ten-phase card game</p><h1>Make your<br/><i>phase count.</i></h1><p className="sub">Complete Phase {player.phase}: {PHASES[player.phase - 1]}.</p></section><div className="phase-layout"><section className="table phase-table"><div className="table-top"><div><span className="live-dot"/> LIVE PHASE 10 <small>• {state.players.length} PLAYERS</small></div>{localPlayer === 0 && <button className="outline" onClick={state.status === "round-over" ? () => updatePhase({ type: "next-round" }) : start}>{state.status === "round-over" ? "Next round" : "New round"}</button>}</div><div className="turn-banner"><span>✦</span><b>{state.status !== "playing" ? "ROUND COMPLETE" : `${(active.name || "Player").toUpperCase()}’S TURN`}</b><em>{notice}</em></div><div className="players">{state.players.map((item, pIndex) => <article className={`player ${pIndex === state.currentPlayer && state.status === "playing" ? "active" : ""}`} key={item.id}><header><div className="avatar">{item.avatar || "?"}</div><div><b>{item.name || "Player"}</b><small>Phase {item.phase} · {item.hand.length} cards</small></div><strong>{item.score} <small>PTS</small></strong></header>{item.laidPhase && <div className="melds">{item.laidPhase.map((meld) => <button className="meld" key={meld.id} onClick={() => hitPhase(item.id, meld.id)}>{meld.cards.map((card) => <span className={`phase-card mini ${phaseColor(card)}`} key={card.id}>{cardLabel(card)}</span>)}</button>)}</div>}{pIndex === localPlayer ? <div className="phase-hand">{item.hand.map((card) => <button className={`phase-card ${phaseColor(card)} ${selectedPhase.includes(card.id) ? "selected" : ""}`} key={card.id} onClick={() => setSelectedPhase((selected) => selected.includes(card.id) ? selected.filter((id) => id !== card.id) : [...selected, card.id])}><PhaseCardFace card={card}/></button>)}</div> : <div className="hidden-hand">{Array.from({ length: item.hand.length }, (_, i) => <span className="phase-card back" key={i}>✦</span>)}</div>    }{pIndex !== localPlayer && state.currentPlayer === localPlayer && state.turnHasDrawn && item.id !== player.id && player.hand.some((card) => card.kind === "skip") && <button className="skip-button" onClick={() => updatePhase({ type: "use-skip", targetId: item.id })}>Skip {item.name || "player"}</button>}</article>)}</div><div className="phase-actions"><button className="pile draw" onClick={() => updatePhase({ type: "draw", from: "draw" })} disabled={state.currentPlayer !== localPlayer || state.turnHasDrawn}><span className="card back">✦</span><b>DRAW</b><small>{state.drawPile.length} cards</small></button><button className="pile" onClick={() => updatePhase({ type: "draw", from: "discard" })} disabled={state.currentPlayer !== localPlayer || state.turnHasDrawn}><span className={`phase-card ${state.discardPile.at(-1) ? phaseColor(state.discardPile.at(-1)!) : "back"}`}>{state.discardPile.at(-1) ? <PhaseCardFace card={state.discardPile.at(-1)!}/> : "—"}</span><b>DISCARD</b><small>pick up top card</small></button><button className="primary compact" disabled={!selectedPhase.length || state.currentPlayer !== localPlayer || !state.turnHasDrawn} onClick={() => updatePhase({ type: "discard", cardId: selectedPhase[0] })}>Discard selected</button><button className="primary compact" disabled={!proposedMelds || selectedCards.length !== requiredCards || state.currentPlayer !== localPlayer || !state.turnHasDrawn} onClick={() => updatePhase({ type: "lay-phase", melds: proposedMelds || [] })}>Lay Phase</button></div>{phaseError && <p className="phase-error">{phaseError}</p>}<p className="phase-hint">{!state.turnHasDrawn ? "Draw a card first, then select your phase cards." : `Select exactly ${requiredCards} cards. The game will group them into valid melds automatically.`}</p></section><aside className="phase-sidebar"><p className="eyebrow">Your phases</p><h2>Ten steps<br/><i>to finish.</i></h2><div className="phase-list">{PHASES.map((phase, i) => <div className={`phase-list-item ${i + 1 === player.phase ? "current" : ""} ${i + 1 < player.phase ? "done" : ""}`} key={phase}><span>{i + 1}</span><p>{phase}</p></div>)}</div></aside></div></main>;
+    return <main className="phase10-page"><nav><div className="brand"><span>⌁</span> PHASE 10</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav><section className="hero"><p className="eyebrow">The classic ten-phase card game</p><h1>Make your<br/><i>phase count.</i></h1><p className="sub">Complete Phase {player.phase}: {PHASES[player.phase - 1]}.</p></section><div className="phase-layout"><section className="table phase-table"><div className="table-top"><div><span className="live-dot"/> LIVE PHASE 10 <small>• {state.players.length} PLAYERS</small></div>{localPlayer === 0 && <button className="outline" onClick={state.status === "round-over" ? () => updatePhase({ type: "next-round" }) : start}>{state.status === "round-over" ? "Next round" : "New round"}</button>}</div><div className="turn-banner"><span>✦</span><b>{state.status !== "playing" ? "ROUND COMPLETE" : `${(active.name || "Player").toUpperCase()}’S TURN`}</b><em>{notice}</em></div><div className="players">{state.players.map((item, pIndex) => <article className={`player ${pIndex === state.currentPlayer && state.status === "playing" ? "active" : ""}`} key={item.id}><header><div className="avatar">{item.avatar || "?"}</div><div><b>{item.name || "Player"}</b><small>Phase {item.phase} · {item.hand.length} cards</small></div><strong>{item.score} <small>PTS</small></strong></header>{item.laidPhase && <div className="melds">{item.laidPhase.map((meld) => <button className="meld" key={meld.id} onClick={() => hitPhase(item.id, meld.id)}>{meld.cards.map((card) => <span className={`phase-card mini ${phaseColor(card)}`} key={card.id}>{cardLabel(card)}</span>)}</button>)}</div>    }{pIndex === localPlayer ? <div className="phase-hand">{item.hand.map((card) => <button className={`phase-card ${phaseColor(card)} ${selectedPhase.includes(card.id) ? "selected" : ""} ${draggedPhaseCard === card.id ? "dragging" : ""}`} draggable onDragStart={() => { draggedPhaseCardRef.current = card.id; setDraggedPhaseCard(card.id); }} onDragOver={(event) => event.preventDefault()} onDrop={() => { const fromId = draggedPhaseCardRef.current; if (fromId) reorderPhaseHand(fromId, card.id); suppressPhaseClickRef.current = true; draggedPhaseCardRef.current = null; setDraggedPhaseCard(null); }} onDragEnd={() => { draggedPhaseCardRef.current = null; setDraggedPhaseCard(null); }} aria-label={`Card ${cardLabel(card)}. Drag to reorder.`} key={card.id} onClick={() => { if (suppressPhaseClickRef.current) { suppressPhaseClickRef.current = false; return; } if (draggedPhaseCardRef.current) return; togglePhaseCard(card.id); }}><PhaseCardFace card={card}/></button>)}</div> : <div className="hidden-hand">{Array.from({ length: item.hand.length }, (_, i) => <span className="phase-card back" key={i}>✦</span>)}</div>}{pIndex !== localPlayer && state.currentPlayer === localPlayer && state.turnHasDrawn && item.id !== player.id && player.hand.some((card) => card.kind === "skip") && <button className="skip-button" onClick={() => updatePhase({ type: "use-skip", targetId: item.id })}>Skip {item.name || "player"}</button>}</article>)}</div><div className="phase-actions"><button className="pile draw" onClick={() => updatePhase({ type: "draw", from: "draw" })} disabled={state.currentPlayer !== localPlayer || state.turnHasDrawn}><span className="card back">✦</span><b>DRAW</b><small>{state.drawPile.length} cards</small></button><button className="pile" onClick={() => updatePhase({ type: "draw", from: "discard" })} disabled={state.currentPlayer !== localPlayer || state.turnHasDrawn}><span className={`phase-card ${state.discardPile.at(-1) ? phaseColor(state.discardPile.at(-1)!) : "back"}`}>{state.discardPile.at(-1) ? <PhaseCardFace card={state.discardPile.at(-1)!}/> : "—"}</span><b>DISCARD</b><small>pick up top card</small></button>    <button className="primary compact" disabled={selectedPhase.length !== 1 || state.currentPlayer !== localPlayer || !state.turnHasDrawn} onClick={() => updatePhase({ type: "discard", cardId: selectedPhase[0] })}>Discard selected</button><button className="primary compact" disabled={!proposedMelds || selectedCards.length !== requiredCards || state.currentPlayer !== localPlayer || !state.turnHasDrawn} onClick={() => updatePhase({ type: "lay-phase", melds: proposedMelds || [] })}>Lay Phase</button></div>{phaseError && <p className="phase-error">{phaseError}</p>}    <p className="phase-hint">{!state.turnHasDrawn ? "Draw first. Then click cards to select them or drag them to reorder your hand." : player.laidPhase ? "Select one card, then click a laid meld to place it." : `Select exactly ${requiredCards} cards. Runs will be arranged in ascending order.`}</p></section><aside className="phase-sidebar"><p className="eyebrow">Your phases</p><h2>Ten steps<br/><i>to finish.</i></h2><div className="phase-list">{PHASES.map((phase, i) => <div className={`phase-list-item ${i + 1 === player.phase ? "current" : ""} ${i + 1 < player.phase ? "done" : ""}`} key={phase}><span>{i + 1}</span><p>{phase}</p></div>)}</div></aside></div></main>;
   }
 
-  return <main><nav><div className="brand"><span>⌁</span> GOLF NIGHT</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav><section className="hero"><p className="eyebrow">A four-card game for friends</p><h1>Keep your score<br/><i>under par.</i></h1><p className="sub">Draw smart. Swap wisely. The lowest total wins.</p></section><section className="table"><div className="table-top"><div><span className="live-dot"/> LIVE GOLF <small>• {state.players.length} PLAYERS</small></div>{localPlayer === 0 && <button className="outline" onClick={start}>New round</button>}</div><div className="turn-banner"><span>✦</span><b>{state.revealed ? `ROUND COMPLETE${state.winnerId ? ` · ${state.players.find((player) => player.id === state.winnerId)?.name} WINS` : ""}` : `${state.players[state.turn].name.toUpperCase()}’S TURN`}</b><em>{notice}</em></div><div className="players">{state.players.map((player, pIndex) => <article className={`player ${pIndex === state.turn && !state.revealed ? "active" : ""}`} key={player.id}><header><div className="avatar">{player.avatar}</div><div><b>{player.name}</b><small>{pIndex === state.turn && !state.revealed ? "playing now" : "at the table"}</small></div><strong>{player.score} <small>PTS</small></strong></header><div className="cards">{player.cards.map((card, cIndex) => { const visible = !!state.revealed || (pIndex === localPlayer && cIndex >= 2) || (pIndex === localPlayer && cIndex < 2 && player.topUsed[cIndex]); return <button className={`card ${visible ? golfColor(card.suit) : "back"} ${cIndex < 2 && player.topUsed[cIndex] ? "sideways" : ""}`} disabled={!heldGolf || pIndex !== localPlayer || state.turn !== localPlayer} onClick={() => actGolf(cIndex)} key={card.id}>{visible ? <GolfCardFace card={card}/> : "✦"}</button>; })}</div></article>)}</div><div className="piles"><button className="pile draw" onClick={() => drawGolf("draw")} disabled={!!heldGolf || state.turn !== localPlayer || !!state.revealed}><span className="card back">✦</span><b>DRAW</b><small>{state.draw.length} cards</small></button><div className="held"><span>IN HAND</span>{heldGolf ? <div className={`card ${golfColor(heldGolf.suit)}`}><GolfCardFace card={heldGolf}/></div> : <div className="empty">—</div>}{heldGolf && <button className="discard-button" onClick={() => actGolf()}>Discard card</button>}</div><button className="pile" onClick={() => drawGolf("discard")} disabled={!!heldGolf || state.turn !== localPlayer || !!state.revealed}><span className={`card ${state.discard.at(-1) ? golfColor(state.discard.at(-1)!.suit) : "back"}`}>{state.discard.at(-1) ? <GolfCardFace card={state.discard.at(-1)!} /> : "—"}</span><b>DISCARD</b><small>pick up top card</small></button></div></section><section className="how"><div><p className="eyebrow">How to play</p><h2>Small cards.<br/>Big moves.</h2></div><div className="rules"><p><b>01</b> Your bottom two cards are visible to you.</p><p><b>02</b> Draw or take discard, then swap or discard.</p><p><b>03</b> Swapped top cards turn sideways.</p><p><b>04</b> The round ends after the final draw card is played.</p></div></section></main>;
+  const golfTurnLabel = localPlayer === state.turn ? "YOUR TURN" : `${state.players[state.turn].name.toUpperCase()}’S TURN`;
+  return <main><nav><div className="brand"><span>⌁</span> GOLF NIGHT</div><div className="room">ROOM <strong>{roomCode}</strong> <button onClick={() => navigator.clipboard?.writeText(roomCode)}>Copy</button></div></nav><section className="hero"><p className="eyebrow">A four-card game for friends</p><h1>Keep your score<br/><i>under par.</i></h1><p className="sub">Draw smart. Swap wisely. The lowest total wins.</p></section><section className="table"><div className="table-top"><div><span className="live-dot"/> LIVE GOLF <small>• {state.players.length} PLAYERS</small></div>{localPlayer === 0 && <button className="outline" onClick={start}>New round</button>}</div><div className="turn-banner"><span>✦</span>  <b>{state.revealed ? `ROUND COMPLETE${state.winnerId ? ` · ${state.players.find((player) => player.id === state.winnerId)?.name} WINS` : ""}` : golfTurnLabel}</b><em>{notice}</em></div><div className="players">{state.players.map((player, pIndex) => <article className={`player ${pIndex === state.turn && !state.revealed ? "active" : ""}`} key={player.id}><header><div className="avatar">{player.avatar}</div><div><b>{player.name}</b><small>{pIndex === state.turn && !state.revealed ? "playing now" : "at the table"}</small></div><strong>{player.score} <small>PTS</small></strong></header><div className="cards">{player.cards.map((card, cIndex) => { const visible = !!state.revealed || (pIndex === localPlayer && cIndex >= 2) || (pIndex === localPlayer && cIndex < 2 && player.topUsed[cIndex]); return <button className={`card ${visible ? golfColor(card.suit) : "back"} ${cIndex < 2 && player.topUsed[cIndex] ? "sideways" : ""}`} disabled={!heldGolf || pIndex !== localPlayer || state.turn !== localPlayer} onClick={() => actGolf(cIndex)} key={card.id}>{visible ? <GolfCardFace card={card}/> : "✦"}</button>; })}</div></article>)}</div><div className="piles"><button className="pile draw" onClick={() => drawGolf("draw")} disabled={!!heldGolf || state.turn !== localPlayer || !!state.revealed}><span className="card back">✦</span><b>DRAW</b><small>{state.draw.length} cards</small></button><div className="held"><span>IN HAND</span>{heldGolf ? <div className={`card ${golfColor(heldGolf.suit)}`}><GolfCardFace card={heldGolf}/></div> : <div className="empty">—</div>}{heldGolf && <button className="discard-button" onClick={() => actGolf()}>Discard card</button>}</div><button className="pile" onClick={() => drawGolf("discard")} disabled={!!heldGolf || state.turn !== localPlayer || !!state.revealed}><span className={`card ${state.discard.at(-1) ? golfColor(state.discard.at(-1)!.suit) : "back"}`}>{state.discard.at(-1) ? <GolfCardFace card={state.discard.at(-1)!} /> : "—"}</span><b>DISCARD</b><small>pick up top card</small></button></div></section><section className="how"><div><p className="eyebrow">How to play</p><h2>Small cards.<br/>Big moves.</h2></div><div className="rules"><p><b>01</b> Your bottom two cards are visible to you.</p><p><b>02</b> Draw or take discard, then swap or discard.</p><p><b>03</b> Swapped top cards turn sideways.</p><p><b>04</b> The round ends after the final draw card is played.</p></div></section></main>;
 }
